@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gta-ai-clipper"
+version = "0.1.0"
+description = "Local pipeline that finds highlight moments in long GTA streams and renders vertical clips."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "PyYAML>=6.0",
+    "opencv-python-headless>=4.8",
+]
+
+[project.optional-dependencies]
+transcribe = ["faster-whisper>=1.0"]
+review = ["streamlit>=1.32"]
+dev = ["pytest>=7"]
+
+[project.scripts]
+clipper = "clipper.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["clipper*"]
+
+[tool.setuptools.package-data]
+clipper = ["defaults.yaml", "assets/fonts/*", "assets/models/*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["slow: renders real video files (a few seconds each)"]

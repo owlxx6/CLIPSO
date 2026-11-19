@@ -1,0 +1,40 @@
+# Streamer profile. Copy this file to config/streamers/<name>.yaml (lowercase, no spaces) and ingest the
+# streamer's VODs with `--streamer <name>`. Anything in clipper/defaults.yaml can be overridden here: only write
+# what differs for this streamer. Weights found by `clipper tune --write` go to config/tuned/<name>.yaml.
+#
+# Lists replace the default list, they are not merged: copy the default list from clipper/defaults.yaml and
+# add to it.
+
+streamer:
+  display_name: "Example"     # how the name appears in post captions ({streamer} in captions.template)
+  # Facecam box as fractions of the frame: x, y, width, height. Leave it out to let the tool detect it.
+  # Set it when detection gets it wrong; check with `clipper layout <id> --preview layout.png`.
+  # facecam: {x: 0.72, y: 0.04, w: 0.26, h: 0.30}
+
+analysis:
+  transcript:
+    language: fr
+
+signals:
+  keywords:
+    fr: ["oh mon dieu", "mon dieu", "c'est quoi ça", "c'est quoi ce", "mais non", "non non non", "nooon",
+         "je suis mort", "jsuis mort", "j'suis mort", "incroyable", "c'est fou", "la folie", "wesh",
+         "au secours", "oh non", "trop fort", "la honte", "pardon", "putain", "dingue", "j'y crois pas",
+         # this streamer's own catchphrases:
+         "c'est la guerre", "on est des fous"]
+  chat:
+    emotes: ["KEKW", "LUL", "LULW", "OMEGALUL", "LMAO", "Pog", "PogChamp", "POGGERS", "monkaS", "W", "WWW",
+             "+1", "MDR", "PTDR", "XD", "😂", "🤣", "💀",
+             # the channel's own emotes:
+             "exampleLUL", "exampleHYPE"]
+
+render:
+  disclosure:
+    enabled: true             # paid campaign: every clip shows the "PUBLICITÉ" tag
+
+captions:
+  template: "{hook} | {streamer} sur GTA VI #GTA6 #GTAVI"
+
+# A campaign that wants longer clips on one platform:
+# platforms:
+#   youtube: {target: story}  # 30-60 s instead of 15-34 s

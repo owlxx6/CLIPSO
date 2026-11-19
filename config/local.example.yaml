@@ -1,0 +1,11 @@
+# Settings for this computer only. Copy to config/local.yaml (git ignores that file).
+
+render:
+  encoder: libx264            # h264_qsv = Intel Arc / Quick Sync (Windows), h264_videotoolbox = Mac, libx264 = anywhere
+
+analysis:
+  transcript:
+    model: small              # base is faster; large-v3-turbo is more accurate but slow on a CPU
+
+# Keep VODs, the database and the exports on a big drive:
+# data_dir: D:/clipper-data

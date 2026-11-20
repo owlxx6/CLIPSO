@@ -143,7 +143,8 @@ def make_cover(video: str | Path, t: float, out_jpg: str | Path) -> Path:
     return out_jpg
 
 
-def make_proxy(src: str | Path, start: float, end: float, out_path: str | Path, height: int = 480) -> Path:
+def make_proxy(src: str | Path, start: float, end: float, out_path: str | Path, height: int = 480,
+               *, layout: dict | None = None, cfg: dict | None = None) -> Path:
     """Small, fast preview of a candidate window for the review app."""
     out_path = Path(out_path)
     if out_path.exists():
@@ -151,8 +152,16 @@ def make_proxy(src: str | Path, start: float, end: float, out_path: str | Path, 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=out_path.parent, prefix=".pending-") as folder:
         staged = Path(folder) / out_path.name  # an interrupted encode never sits at the cached name
+        filters = ["-vf", f"scale=-2:{height}"]
+        if layout:
+            rcfg = cfg["render"]
+            width = max(2, round(height * rcfg["width"] / rcfg["height"] / 2) * 2)
+            band = max(2, round(height * rcfg["facecam_band_h"] / rcfg["height"] / 2) * 2)
+            small = dict(cfg, render=dict(rcfg, width=width, height=height, facecam_band_h=band, encoder="libx264"))
+            graph = video_filter(layout["kind"], layout.get("facecam"), small)
+            filters = ["-filter_complex", graph, "-map", "[vbase]", "-map", "0:a?"]
         media.run([media.ffmpeg_bin(), "-nostdin", "-y", "-v", "error", "-ss", f"{start:.3f}", "-t",
-                   f"{end - start:.3f}", "-i", str(src), "-vf", f"scale=-2:{height}", "-c:v", "libx264", "-preset",
+                   f"{end - start:.3f}", "-i", str(src), *filters, "-c:v", "libx264", "-preset",
                    "ultrafast", "-crf", "30", "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", str(staged)])
         staged.replace(out_path)
     return out_path

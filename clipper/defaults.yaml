@@ -5,6 +5,7 @@
 data_dir: data
 
 analysis:
+  mode: classic               # classic | stream_highlights
   hop_s: 0.5                  # timeline resolution in seconds
   audio:
     sample_rate: 16000
@@ -61,6 +62,58 @@ detection:
   snap_search_s: 3.0          # move cuts to the nearest sentence start/end (or quiet point) within this range
   max_overlap: 0.5
   cinematic_flag_fraction: 0.3
+
+# Stream Highlights runs on CPU and has independent candidates and timing.
+stream_highlights:
+  sample_fps: 2               # sparse, regularly spaced decoded analysis frames
+  scan_width: 480             # never upscale the source
+  baseline_s: 21              # local median for energy and gameplay activity
+  energy_rise_db: 12
+  pitch_min_hz: 75
+  pitch_max_hz: 420
+  pitch_change_semitones: 6
+  voicing_threshold: 0.65     # autocorrelation minimum for adjacent periodic audio windows
+  motion_rise: 0.30           # excess fraction of changed gameplay pixels
+  scene_change: 0.48          # grayscale histogram distance
+  camera_type: unknown        # unknown | gameplay_only | webcam | full_body | screen_reaction | avatar
+  sync_s: 3                   # ordinary response window, within the same shot
+  delayed_sync_s: 8           # longer window for corroborated responses without a competing event
+  repeat_laugh_gap_s: 6       # maximum pause between marked laughs in the same scene
+  reaction_release: 0.32      # retain continuous weaker activity after a supported reaction
+  hard_cut: 0.72              # persistent histogram break, checked against adjacent samples
+  payoff_search_s: 7          # look for a visible result after an existing event
+  quiet_change_fraction: 0.08 # fraction of sampled gameplay pixels changed at a possible result
+  quiet_still_fraction: 0.025 # maximum fraction changed while the new image holds
+  hold_s: 1.5                 # minimum observed persistence for a visual cue
+  read_s: 4                   # reading allowance; a matched card can finish within one extra settle interval
+  topic_pause_s: 1.2          # after a completed utterance, avoid absorbing a new one across this gap
+  result_card:
+    template: null            # optional local image cropped to a known result message
+    roi: null                 # normalized [x, y, width, height] matching that crop
+    similarity: 0.90          # normalized template correlation in the configured region
+  group_gap_s: 2.5
+  max_event_s: 24
+  setup_margin_s: 2.5
+  max_setup_s: 26
+  settle_s: 1.0
+  dialogue_bridge_s: 11       # one unresolved speech gap with continuing game activity and no shot cut
+  speech_pause_s: 1.6
+  min_s: 5
+  max_s: 90
+  chaos_terms: [explosion, collision, carambolage, crash, accident, poursuite]  # quotes used as cues only
+  evidence_floor: 0.55
+  opening:
+    window_s: 3               # first 1 to 3 seconds of the actual cut
+    late_discount: 0.30       # maximum discount for a cue at the far end of the opening
+    visible_s: 1.0            # minimum overlap to credit a held image or known result graphic
+    search_s: 4               # maximum idle lead-in to trim within the same scene
+    context_lead_s: 0.75      # preserve an establishing beat before measured activity
+    silence_db: -50           # only verified quiet, visually stable padding can be trimmed
+    strong_min: 0.55          # weaker openings request review
+    bonus_weight: 0.18        # provisional rank points at full strength, capped at 10% of quality
+  min_score: 1.1
+  weights: {audio_reaction: 1.6, facecam_activity: 0.8, gameplay_activity: 0.8, event_reaction_sync: 3.2,
+            narrative_coherence: 1.15, novelty: 0.55, context_completeness: 0.3}
 
 targets:
   campaign: {min_s: 15, max_s: 34}

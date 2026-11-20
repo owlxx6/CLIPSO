@@ -246,6 +246,18 @@ Put these in `config/streamers/<name>.yaml` (one streamer) or `config/local.yaml
 All settings and their defaults are in `clipper/defaults.yaml`. Lists replace the default list instead of
 adding to it.
 
+## Stream Highlights (GTA)
+
+Run `clipper analyze SOURCE --mode stream_highlights` to rank gameplay changes alongside possible reactions. The existing `classic` ranking and the Stream Highlights ranking can coexist for the same recording. Their candidate IDs and hooks are independent. Good/Bad labels remain attached to source times in both views.
+
+In `clipper review` choose **Stream Highlights**, inspect the time-stamped evidence and uncertainty, preview a vertical layout, and save the bounds and hook before exporting. A blank hook is supported. Use `clipper render SOURCE --mode stream_highlights --top 1 --platforms tiktok --layout stacked` for a local vertical file. The existing campaign and duplicate checks apply.
+
+The [Stream Highlights guide and benchmark](docs/STREAM_HIGHLIGHTS.md) contains the PowerShell walkthrough, supported configuration, comparison on a 15-minute recording, sources and limitations.
+
+For a recording with a real webcam, run `clipper layout SOURCE --camera-type webcam` before analysis. Other choices include gameplay only, a full-body camera, screen reactions and avatars. Review now shows delayed and sustained reaction evidence, held-image or known result-card timing, and uncertain endings. A local image of a result message can serve as an optional template.
+
+The review shows **Highlight quality**, **Opening strength** and the **Ranking bonus** separately. Open **First-seconds evidence** to see what happened in the first seconds of the current cut. Moving a boundary recalculates the preview score. Saving the edit updates the source ranking. Reanalyze older candidates to add these measurements. [Opening rules and settings](docs/STREAM_HIGHLIGHTS.md#first-seconds-opening-strength)
+
 ## Duplicate guard
 
 Before rendering, for each platform:

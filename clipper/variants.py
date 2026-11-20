@@ -36,7 +36,7 @@ def _edge_options(anchor, other, peak, duration, min_s, max_s, radius, before, s
     word_edges = {s if before else e for s, e in nearby_words if near(s if before else e)}
     cues = {t for t in cues if near(t)}
     options = []
-    for t in sorted(grid | sentences | cues | word_edges):
+    for t in sorted(anchors | grid | sentences | cues | word_edges):
         if not 0 <= t <= duration or any(s < t < e for s, e in nearby_words):
             continue
         if before and t >= peak or not before and t <= peak:
@@ -58,7 +58,8 @@ def plan_variants(
     cfg: dict,
     used_cuts: dict[str, list[tuple[float, float]]] | None = None,
     *, transcript: dict | None = None, cues: list[float] | None = None,
-    duration_limits: tuple[float, float] | None = None,
+    duration_limits: tuple[float, float] | None = None, protected: bool = False, end_ceiling: float | None = None,
+    scene_start: float | None = None,
 ) -> list[Variant]:
     used_cuts = used_cuts or {}
     min_dist = float(cfg["variants"]["min_cut_distance_s"])
@@ -71,13 +72,21 @@ def plan_variants(
         pcfg = cfg["platforms"][platform]
         target = cfg["targets"][pcfg.get("target", "campaign")]
         min_s, max_s = float(target["min_s"]), float(pcfg.get("max_s", target["max_s"]))
+        if protected:
+            min_s = min(duration, float(cfg["stream_highlights"]["min_s"]))
+            max_s = min(float(cfg["stream_highlights"]["max_s"]), float(pcfg.get("max_s", duration)))
         if duration_limits:
             min_s = max(min_s, duration_limits[0])
             max_s = min(max_s, duration_limits[1])
         rng = random.Random(f"{cand_id}:{platform}")
         radius = max(float(pcfg.get("trim_jitter_s", 1.2)), float(cfg["detection"]["snap_search_s"]))
         starts = _edge_options(start, end, peak, duration, min_s, max_s, radius, True, segments, words, cues)
+        if protected and scene_start is not None:
+            starts = [(t, cost) for t, cost in starts if t >= min(start, scene_start)
+                      and (t == start or not any(a < t < b for a, b in segments))]
         ends = _edge_options(end, start, peak, duration, min_s, max_s, radius, False, segments, words, cues)
+        if protected and end_ceiling is not None:
+            ends = [(t, cost) for t, cost in ends if t <= max(end, end_ceiling)]
         pre = min(peak - start, float(cfg["detection"]["pre_roll_s"]), max_s * 0.5)
         post = min(end - peak, float(cfg["detection"]["post_roll_s"]), max_s * 0.3)
         best = None
@@ -86,6 +95,8 @@ def plan_variants(
             if s > peak - pre or any(abs(s - v.start) < min_dist for v in out):
                 continue
             for e, end_cost in ends:
+                if protected and (s > start or e < end):
+                    continue
                 if e < peak + post or not min_s <= e - s <= max_s:
                     continue
                 if any(abs(e - v.end) < min_dist for v in out):
@@ -93,9 +104,14 @@ def plan_variants(
                 if any(abs(s - us) < reuse_tol and abs(e - ue) < reuse_tol for us, ue in used_cuts.get(platform, [])):
                     continue
                 rank = (start_cost + end_cost, abs(s - start) + abs(e - end), s, e)
+                if protected:
+                    rank = (start - s + e - end, *rank)
                 if best is None or rank < best:
                     best, chosen = rank, (s, e)
         if chosen is None:
+            if protected:
+                raise ValueError(f"No {platform} cut fits the reviewed interval, duration limits and distinct-cut "
+                                 "rules. Review the bounds or render fewer platforms.")
             raise RuntimeError(f"could not plan distinct cuts for candidate {cand_id} on {platform}")
         out.append(Variant(
             platform=platform,

@@ -9,6 +9,7 @@ Manual boxes (streamer config or `clipper layout --set`) always win over detecti
 from __future__ import annotations
 
 import json
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -134,8 +135,10 @@ def layout_file(workdir: Path) -> Path:
 
 
 def save_layout(workdir: Path, layout: dict) -> None:
-    with open(layout_file(workdir), "w", encoding="utf-8") as fh:
-        json.dump(layout, fh, indent=2)
+    with tempfile.TemporaryDirectory(dir=workdir) as folder:
+        staged = Path(folder) / "layout.json"
+        staged.write_text(json.dumps(layout, indent=2), encoding="utf-8")
+        staged.replace(layout_file(workdir))
 
 
 def load_layout(workdir: Path) -> dict | None:

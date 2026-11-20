@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+import tempfile
 from pathlib import Path
 
 from clipper import config, media
@@ -147,7 +148,10 @@ def make_proxy(src: str | Path, start: float, end: float, out_path: str | Path, 
     if out_path.exists():
         return out_path
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    media.run([media.ffmpeg_bin(), "-nostdin", "-y", "-v", "error", "-ss", f"{start:.3f}", "-t", f"{end - start:.3f}",
-               "-i", str(src), "-vf", f"scale=-2:{height}", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "30",
-               "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", str(out_path)])
+    with tempfile.TemporaryDirectory(dir=out_path.parent, prefix=".pending-") as folder:
+        staged = Path(folder) / out_path.name  # an interrupted encode never sits at the cached name
+        media.run([media.ffmpeg_bin(), "-nostdin", "-y", "-v", "error", "-ss", f"{start:.3f}", "-t",
+                   f"{end - start:.3f}", "-i", str(src), "-vf", f"scale=-2:{height}", "-c:v", "libx264", "-preset",
+                   "ultrafast", "-crf", "30", "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", str(staged)])
+        staged.replace(out_path)
     return out_path

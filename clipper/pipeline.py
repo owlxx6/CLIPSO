@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import tempfile
@@ -44,6 +45,9 @@ def ingest(conn, cfg: dict, video: str | Path, rights: str, streamer: str | None
     info = media.probe(video)
     if not info["has_video"]:
         raise ValueError(f"{video} has no video stream")
+    for extra in (chat_file, clips_file, transcript_file):  # before the source exists, not half way through
+        if extra and not Path(extra).is_file():
+            raise FileNotFoundError(f"no such file: {extra}")
     source_id = db.add_source(
         conn, path=str(video), title=title or video.stem, streamer=streamer, language=language, rights=rights,
         campaign=campaign, duration=info["duration"], width=info["width"], height=info["height"], fps=info["fps"],
@@ -97,7 +101,35 @@ def raw_signals(cfg: dict, source: dict, force: bool = False, log=print) -> dict
     return {"_db": db_curve, "_cinematic": cine}
 
 
+def _adopt_legacy_transcript(wd: Path, log=print) -> dict | None:
+    """The first version kept supplied and generated transcripts in transcript.json. Copy it (the original stays)
+    to transcript.imported.json, so the source keeps the transcript its candidates were analysed with."""
+    legacy, target = wd / "transcript.json", wd / "transcript.imported.json"
+    if not legacy.exists():
+        return None
+    try:
+        data = tr.load(legacy)
+    except (OSError, ValueError) as exc:
+        log(f"cannot read the first-version transcript {legacy}: {exc}")
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("segments"), list):
+        log(f"ignoring the first-version transcript {legacy}: no segments")
+        return None
+    with tempfile.TemporaryDirectory(dir=wd) as folder:
+        staged = Path(folder) / target.name
+        shutil.copy2(legacy, staged)
+        staged.replace(target)
+    log(f"adopted the first-version transcript {legacy.name} as {target.name} in {wd}; "
+        f"to regenerate speech, move {target.name} aside and run analyze --force with Whisper enabled")
+    return data
+
+
 def get_transcript(cfg: dict, source: dict, transcribe: bool = True, log=print, force: bool = False) -> dict | None:
+    """The supplied transcript if any, else the generated one.
+
+    With transcribe=False (render, `analyze --no-transcribe`, tune) a generated transcript of the same source file
+    is used even if the Whisper settings changed since: it is the one the candidates were analysed with.
+    """
     wd = workdir(cfg, source["id"])
     imported = tr.load(wd / "transcript.imported.json")
     if imported is not None:
@@ -108,9 +140,14 @@ def get_transcript(cfg: dict, source: dict, transcribe: bool = True, log=print, 
         tcfg["language"] = source["language"]
     key = {"source": _source_key(source), "settings": tcfg}
     cached = tr.load(path)
+    can_transcribe = transcribe and tcfg.get("enabled", True)
+    if cached is None and not (force and can_transcribe):
+        adopted = _adopt_legacy_transcript(wd, log)
+        if adopted is not None:
+            return adopted
     if cached and cached["key"] == key and not force:
         return cached["transcript"]
-    if transcribe and tcfg.get("enabled", True):
+    if can_transcribe:
         data = tr.transcribe(source["path"], tcfg, log)
         if data is not None:
             with tempfile.TemporaryDirectory(dir=wd) as folder:
@@ -118,12 +155,11 @@ def get_transcript(cfg: dict, source: dict, transcribe: bool = True, log=print, 
                 tr.save(staged, {"key": key, "transcript": data})
                 staged.replace(path)
             return data
-    # Pre-versioned imports and generated transcripts shared a filename. Retain
-    # them on disk for explicit confirmation by the operator.
-    legacy = wd / "transcript.json"
-    if cached is None and legacy.exists() and not force:
-        log("Legacy transcript has no source or model identity. To confirm it as a supplied transcript, "
-            "copy transcript.json to transcript.imported.json in the source folder.")
+    if not can_transcribe and cached and cached["key"]["source"] == key["source"]:
+        if cached["key"] != key:
+            log("using the transcript made with earlier Whisper settings; "
+                f"run `clipper analyze {source['id']}` to transcribe again with the current ones")
+        return cached["transcript"]
     return None
 
 
@@ -204,10 +240,14 @@ def make_caption(cfg: dict, source: dict, hook: str | None, text: str) -> str:
     return " ".join(caption.replace("|  ", "").split()).strip(" |")
 
 
-def _remove_export_files(path: str) -> None:
+def _remove_export_files(path: str, log=print) -> None:
+    """Best effort: the new export is already live, so a file that cannot go (open in a player on Windows) stays."""
     p = Path(path)
     for f in (p, p.with_suffix(".jpg"), p.with_suffix(".json"), p.with_suffix(".txt")):
-        f.unlink(missing_ok=True)
+        try:
+            f.unlink(missing_ok=True)
+        except OSError as exc:
+            log(f"could not delete the replaced file {f} ({exc.strerror or exc}); delete it once it is closed")
 
 
 def _export_snapshot(conn, platform: str) -> list[dict]:
@@ -219,7 +259,7 @@ def _export_snapshot(conn, platform: str) -> list[dict]:
 
 
 def _publish(conn, staged: Path, directory: Path, previous: list[dict], replaced: list[dict],
-             fields: dict, source: dict) -> tuple[int, Path]:
+             fields: dict, source: dict, log=print) -> tuple[int, Path]:
     moved = []
     try:
         with conn:
@@ -245,7 +285,7 @@ def _publish(conn, staged: Path, directory: Path, previous: list[dict], replaced
         raise
     for row in replaced:
         if Path(row["path"]).resolve().parent == directory.resolve():
-            _remove_export_files(row["path"])
+            _remove_export_files(row["path"], log)
     return eid, out
 
 
@@ -264,22 +304,32 @@ def render_candidates(conn, cfg: dict, source_id: int, candidate_ids: list[int],
     unknown = [p for p in platforms if p not in cfg["platforms"]]
     if unknown:
         raise ValueError(f"unknown platform(s): {unknown}; configured: {list(cfg['platforms'])}")
+    transcript = get_transcript(cfg, source, transcribe=False, log=log)
+    all_words = tr.words(transcript)
+    cands = [db.get_candidate(conn, cid) for cid in candidate_ids]
+    for cand in cands:  # checked before anything is rendered
+        if cand["source_id"] != source_id:
+            raise ValueError(f"candidate #{cand['id']} belongs to source #{cand['source_id']}")
+        if (config.get(cfg, "render.subtitles.enabled", True) and (cand.get("text") or "").strip()
+                and not tr.text_between(transcript, cand["start_s"], cand["end_s"])):
+            raise RuntimeError(f"candidate #{cand['id']} has speech but its transcript is missing or was made from "
+                               f"another file, so the clip would have no captions: run clipper analyze {source_id}")
     wd = workdir(cfg, source_id)
     lay = ensure_layout(cfg, source, log=log)
     if layout_kind:
         lay = layout_mod.resolve(cfg, wd, layout_kind)
-    all_words = tr.words(get_transcript(cfg, source, transcribe=False))
     use_disclosure = disclosure if disclosure is not None else bool(config.get(cfg, "render.disclosure.enabled"))
-    disclosure_text = str(config.get(cfg, "render.disclosure.text", "PUBLICITÉ")) if use_disclosure else None
+    configured_label = config.get(cfg, "render.disclosure.text")
+    label = subtitles.clean(configured_label) if isinstance(configured_label, str) else ""
+    label = label or "PUBLICITÉ"
+    disclosure_text = label if use_disclosure else None
     paid_rights = source["rights"].strip().casefold().startswith(("campaign:", "content-rewards:"))
     if paid_rights or (source.get("campaign") or "").strip():
-        disclosure_text = "PUBLICITÉ"
+        disclosure_text = label  # paid campaign clips are always labelled
     dcfg = cfg["dedup"]
     results = []
-    for cid in candidate_ids:
-        cand = db.get_candidate(conn, cid)
-        if cand["source_id"] != source_id:
-            raise ValueError(f"candidate #{cid} belongs to source #{cand['source_id']}")
+    for cand in cands:
+        cid = cand["id"]
         if (cand.get("flags") or {}).get("spoiler_review"):
             log(f"candidate #{cid}: looks like a cutscene, check it for story spoilers before posting")
         used = {p: [(e["start_s"], e["end_s"]) for e in db.list_exports(conn, platform=p, source_id=source_id)]
@@ -343,13 +393,15 @@ def render_candidates(conn, cfg: dict, source_id: int, candidate_ids: list[int],
                 out.with_suffix(".txt").write_text(caption + "\n", encoding="utf-8")
                 fields = dict(candidate_id=cid, source_id=source_id, platform=v.platform, start_s=v.start,
                               end_s=v.end, hook=hook_text, caption=caption, signature=sig)
-                eid, out = _publish(conn, out, out_dir, snapshot, replaced, fields, source)
+                eid, out = _publish(conn, out, out_dir, snapshot, replaced, fields, source, log)
             results.append(dict(meta, export_id=eid, path=str(out)))
     return results
 
 
 def preview_proxy(cfg: dict, source: dict, cand: dict) -> Path:
+    height = int(config.get(cfg, "render.proxy_height", 480))
+    # the name is the cache key: same window of the same file at the same size
+    key = hashlib.sha1(json.dumps([_source_key(source), height], sort_keys=True).encode("utf-8")).hexdigest()[:12]
     out = config.data_dir(cfg) / "proxies" / f"source_{source['id']}" / \
-        f"{cand['start_s']:.2f}_{cand['end_s']:.2f}.mp4"
-    return render.make_proxy(source["path"], cand["start_s"], cand["end_s"], out,
-                             int(config.get(cfg, "render.proxy_height", 480)))
+        f"{cand['start_s']:.2f}_{cand['end_s']:.2f}_{key}.mp4"
+    return render.make_proxy(source["path"], cand["start_s"], cand["end_s"], out, height)

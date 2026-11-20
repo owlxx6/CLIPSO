@@ -7,6 +7,7 @@ import sqlite3
 from typing import Any, Iterable
 
 from clipper import config
+from clipper.signals import transcript as tr
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS sources (
@@ -94,7 +95,7 @@ def connect(cfg: dict) -> sqlite3.Connection:
                 conn.execute("BEGIN IMMEDIATE")
                 version = conn.execute("PRAGMA user_version").fetchone()[0]
                 if version == 0:
-                    _initialize(conn)
+                    _initialize(conn, cfg)
                 elif version != 1:
                     raise ValueError(f"Unsupported database version {version}")
     except Exception:
@@ -103,7 +104,40 @@ def connect(cfg: dict) -> sqlite3.Connection:
     return conn
 
 
-def _initialize(conn: sqlite3.Connection) -> None:
+def _first_version_transcript(cfg: dict, source_id: int) -> dict | None:
+    """The transcript a first-version analysis used (same folder layout as pipeline.workdir)."""
+    folder = config.data_dir(cfg) / "sources" / str(source_id)
+    for name in ("transcript.imported.json", "transcript.json"):
+        try:
+            data = tr.load(folder / name)
+        except (OSError, ValueError):
+            continue
+        if isinstance(data, dict) and isinstance(data.get("segments"), list):
+            return data
+    return None
+
+
+def _flag_edited_hooks(conn: sqlite3.Connection, cfg: dict) -> None:
+    """Allow a legacy hook to refresh only when its automatic text can be reproduced."""
+    sources = conn.execute("SELECT id, streamer FROM sources WHERE id IN "
+                           "(SELECT source_id FROM candidates WHERE hook IS NOT NULL)").fetchall()
+    for source in sources:
+        profile = config.load_config(streamer=source["streamer"]) if source["streamer"] else cfg
+        transcript = _first_version_transcript(cfg, source["id"]) if config.get(profile, "render.hook.auto", True) else None
+        max_words = int(config.get(profile, "render.hook.max_words", 7))
+        rows = conn.execute("SELECT id, peak_s, hook FROM candidates WHERE source_id=? AND hook IS NOT NULL",
+                            (source["id"],)).fetchall()
+        for row in rows:
+            try:
+                automatic = tr.peak_phrase(transcript, float(row["peak_s"]), max_words)
+            except (AttributeError, KeyError, TypeError, ValueError):
+                # Incomplete legacy speech data cannot establish the origin of a hook.
+                automatic = None
+            edited = not automatic or row["hook"] != automatic
+            conn.execute("UPDATE candidates SET hook_edited=? WHERE id=?", (int(edited), row["id"]))
+
+
+def _initialize(conn: sqlite3.Connection, cfg: dict) -> None:
     tables = ("sources", "candidates", "labels", "exports", "posts")
     legacy = conn.execute("SELECT 1 FROM sqlite_master WHERE name='sources'").fetchone()
     if legacy:
@@ -126,7 +160,7 @@ def _initialize(conn: sqlite3.Connection) -> None:
             conn.execute(f"INSERT INTO {table} ({columns}) SELECT {columns} FROM legacy_{table}")
             if table in sequences:
                 conn.execute("UPDATE sqlite_sequence SET seq=MAX(seq, ?) WHERE name=?", (sequences[table], table))
-        conn.execute("UPDATE candidates SET hook_edited=1 WHERE hook IS NOT NULL")
+        _flag_edited_hooks(conn, cfg)
         for table in reversed(tables):
             conn.execute(f"DROP TABLE legacy_{table}")
         for statement in SCHEMA.split(";"):

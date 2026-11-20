@@ -74,7 +74,6 @@ def test_unknown_layout_is_rejected(cfg):
 def test_stacked_gameplay_does_not_show_the_facecam_twice(cfg, tmp_path, cam_x):
     import subprocess
 
-    import cv2
     import numpy as np
 
     from clipper import media, render
@@ -84,11 +83,11 @@ def test_stacked_gameplay_does_not_show_the_facecam_twice(cfg, tmp_path, cam_x):
     x0, x1 = round(cam["x"] * 1280), round((cam["x"] + cam["w"]) * 1280)
     img[24:264, x0:x1] = (255, 0, 0)  # pure blue facecam (BGR)
     src, out = tmp_path / "frame.png", tmp_path / "out.png"
-    cv2.imwrite(str(src), img)
+    media.write_image(src, img)
     graph = render.video_filter("stacked", cam, cfg, zoom=1.0, out="v")
     subprocess.run([media.ffmpeg_bin(), "-v", "error", "-y", "-loop", "1", "-t", "0.2", "-i", str(src),
                     "-filter_complex", graph, "-map", "[v]", "-frames:v", "1", "-update", "1", str(out)], check=True)
-    frame = cv2.imread(str(out)).astype(int)
+    frame = media.read_image(out).astype(int)
     band = int(cfg["render"]["facecam_band_h"])
     blue = (frame[:, :, 0] - frame[:, :, 2]) > 60
     assert blue[:band].mean() > 0.9          # the facecam fills the top band

@@ -143,6 +143,28 @@ def bgr_frame_at(path: str | Path, t: float, src_size: tuple[int, int], width: i
     return np.frombuffer(out[:need], dtype=np.uint8).reshape(height, width, 3).copy()
 
 
+def write_image(path: str | Path, image: np.ndarray) -> Path:
+    """cv2.imwrite cannot open non-ASCII paths on Windows (and returns False): encode in memory, write with numpy."""
+    import cv2
+
+    path = Path(path)
+    ok, buf = cv2.imencode(path.suffix or ".png", image)
+    if not ok:
+        raise MediaError(f"could not encode an image for {path}")
+    buf.tofile(str(path))
+    return path
+
+
+def read_image(path: str | Path) -> np.ndarray:
+    """cv2.imread counterpart of write_image (BGR); raises instead of returning None."""
+    import cv2
+
+    image = cv2.imdecode(np.fromfile(str(path), dtype=np.uint8), cv2.IMREAD_COLOR)
+    if image is None:
+        raise MediaError(f"could not decode the image {path}")
+    return image
+
+
 def fmt_ts(seconds: float) -> str:
     seconds = max(0.0, float(seconds))
     h = int(seconds // 3600)

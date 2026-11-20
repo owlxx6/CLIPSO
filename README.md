@@ -31,7 +31,7 @@ Chat and viewer clips are the strongest predictors: give them whenever you can.
   The rights note is copied into every export's `.json`.
 - **You post, by hand or through official APIs.** No posting bots, no browser automation, one account per
   platform.
-- **Paid clips are labelled.** A source with `--campaign` or a `campaign:` / `content-rewards:` rights note always burns in "PUBLICITÉ" (French law on influencer marketing).
+- **Paid clips are labelled.** A source with `--campaign` or a `campaign:` / `content-rewards:` rights note always burns in the configured `render.disclosure.text`. The default is "PUBLICITÉ".
   Use `--disclosure` to label other sources. Also switch on the platform's own label when you post: *content disclosure* on TikTok, *paid partnership* on
   Instagram, *includes paid promotion* on YouTube.
 - **One version per platform, never twice.** A moment already exported for a platform is skipped, even from
@@ -287,4 +287,6 @@ Coding agents: read [AGENTS.md](AGENTS.md). Work in progress and next steps: [TA
 
 The first database connection migrates the original SQLite schema transactionally. Older exports and posts keep their IDs. Reanalysis retains edited hooks and historical candidates used in exports. Review the existing rights notes before rendering.
 
-New imports keep their supplied transcript separately from generated Whisper output. Generated transcripts depend on the source file and Whisper settings. The first version used the same filename for both. To keep a verified legacy transcript, copy `data/sources/<id>/transcript.json` to `transcript.imported.json` in that directory. Otherwise run analysis with Whisper enabled. A forced run rebuilds generated signals and preserves supplied transcripts.
+Rendering reuses the saved words for the same source file, including after a Whisper settings change. A speech candidate with missing transcript coverage stops before encoding when subtitles are enabled. Run `clipper analyze <id>` with Whisper enabled to regenerate speech.
+
+When a source has only a first-version `transcript.json`, CLIPSO adopts it as `transcript.imported.json` and keeps the original. To replace the adopted transcript with new speech recognition, move the imported copy aside and run `clipper analyze <id> --force` with Whisper enabled. Explicitly supplied transcripts take priority, including during forced analysis.

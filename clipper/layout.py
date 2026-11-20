@@ -15,7 +15,7 @@ import numpy as np
 
 from clipper import config
 from clipper.config import PACKAGE_DIR
-from clipper.media import bgr_frame_at
+from clipper.media import bgr_frame_at, write_image
 
 Box = dict  # {"x": .., "y": .., "w": .., "h": ..} as fractions of the frame
 YUNET_MODEL = PACKAGE_DIR / "assets" / "models" / "face_detection_yunet_2023mar.onnx"
@@ -187,5 +187,4 @@ def preview(path: str | Path, t: float, src_size: tuple[int, int], layout: dict,
     cv2.rectangle(frame, (gx, 0), (gx + gw, h - 1), (0, 200, 0), 3)
     cv2.putText(frame, layout.get("kind", "?"), (12, 32), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255, 255), 2)
     out_png.parent.mkdir(parents=True, exist_ok=True)
-    cv2.imwrite(str(out_png), frame)
-    return out_png
+    return write_image(out_png, frame)

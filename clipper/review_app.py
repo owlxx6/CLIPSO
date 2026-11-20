@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import streamlit as st
 
-from clipper import config, db, evaluate, media, pipeline
+from clipper import config, db, evaluate, media, pipeline, stream_highlights, layout
 
 LABEL_NAMES = {1: "good", 0: "bad", None: "not reviewed"}
 
@@ -24,14 +24,23 @@ if not sources:
 src = st.sidebar.selectbox(
     "Video", sources, format_func=lambda s: f"#{s['id']} - {s['title']} - {media.fmt_ts(s['duration'] or 0)}")
 cfg = pipeline.source_config(src)
-cands = db.list_candidates(conn, src["id"])
+modes = ["classic", stream_highlights.MODE]
+mode = st.sidebar.selectbox("Analysis mode", modes, index=modes.index(cfg["analysis"]["mode"]),
+                            format_func=lambda value: "Stream Highlights" if value == stream_highlights.MODE else "Classic")
+if st.sidebar.button("Analyze recording", key="analyze_source"):
+    try:
+        with st.spinner("Analyzing local recording ..."):
+            pipeline.analyze(conn, cfg, src["id"], mode=mode, transcribe=False, log=st.caption)
+    except (ValueError, RuntimeError, OSError) as exc:
+        st.error(str(exc))
+cands = db.list_candidates(conn, src["id"], mode)
 labels = db.list_labels(conn, src["id"])
 show = st.sidebar.radio("Show", ["all", "not reviewed", "good", "bad"])
 platforms = st.sidebar.multiselect("Platforms to render", list(cfg["platforms"]), default=list(cfg["platforms"]))
 st.sidebar.caption(f"Rights: {src['rights']}")
 
 if not cands:
-    st.warning(f"No candidates for this video yet: run `clipper analyze {src['id']}`.")
+    st.warning("No candidates in this mode. Analyze this recording or change the mode.")
     st.stop()
 
 top_n = len(cands) if len(cands) <= 5 else st.sidebar.slider("Candidates shown", 5, len(cands), min(20, len(cands)))
@@ -51,6 +60,30 @@ for c in cands[:top_n]:
     with st.container(border=True):
         left, right = st.columns([3, 2])
         with left:
+            flags = c.get("flags") or {}
+            start, end = flags.get("review_bounds", [c["start_s"], c["end_s"]])
+            layout_kind = None
+            if mode == stream_highlights.MODE:
+                st.write(f"{flags['moment_type']} · {flags['confidence']} confidence")
+                st.write(flags["reason"])
+                st.caption(" · ".join(f"{name.replace('_', ' ')} {media.fmt_ts(t) if t is not None else 'unobserved'}" for name,t in flags["timing"].items()))
+                with st.expander("Score and timed evidence"):
+                    st.json({"scores": c["signals"], "observations": flags["evidence"]})
+                if flags["cut_risk"]:
+                    st.warning("The ending or setup is uncertain. Check the surrounding footage.")
+                start = st.number_input("Start (seconds)", min_value=0., max_value=float(src["duration"]),
+                                        value=float(start), step=0.25, key=f"start_{c['id']}")
+                end = st.number_input("End (seconds)", min_value=0., max_value=float(src["duration"]),
+                                      value=float(end), step=0.25, key=f"end_{c['id']}")
+                layout_kind = st.selectbox("Framing", ["auto", "stacked", "center_crop", "blur_fit"],
+                                           key=f"layout_{c['id']}")
+                if layout_kind == "stacked" and not layout.resolve(
+                        cfg, pipeline.workdir(cfg, src["id"]), "stacked")["facecam"]:
+                    st.info("A facecam box is required for stacked framing. Preview uses the blurred background "
+                            "until you set the overlay with clipper layout.")
+                for suggestion in flags["hooks"]:
+                    if st.button(suggestion, key=f"quote_{c['id']}_{suggestion}"):
+                        st.session_state[f"hook_{c['id']}"] = suggestion
             st.markdown(f"**#{c['id']} - rank {c['rank']}** - {media.fmt_ts(c['start_s'])} -> "
                         f"{media.fmt_ts(c['end_s'])} - {c['end_s'] - c['start_s']:.0f}s - score {c['score']:.2f} - "
                         f"*{LABEL_NAMES[lab]}*")
@@ -62,6 +95,12 @@ for c in cands[:top_n]:
             if c.get("text"):
                 st.write(f"\"{c['text'][:300]}\"")
             hook = st.text_input("Hook", value=c.get("hook") or "", key=f"hook_{c['id']}")
+            if mode == stream_highlights.MODE and st.button("Save bounds and hook", key=f"save_{c['id']}"):
+                try:
+                    db.save_stream_review(conn, c["id"], start, end, hook)
+                    st.success("Review saved")
+                except ValueError as exc:
+                    st.error(str(exc))
             b1, b2, b3, b4 = st.columns(4)
             if b1.button("Good", key=f"good_{c['id']}"):
                 db.add_label(conn, src["id"], c["start_s"], c["end_s"], 1)
@@ -73,13 +112,16 @@ for c in cands[:top_n]:
                 db.clear_label(conn, src["id"], c["start_s"], c["end_s"])
                 st.rerun()
             if b4.button("Render", key=f"render_{c['id']}", type="primary", disabled=not platforms):
-                if hook != (c.get("hook") or ""):
+                if mode != stream_highlights.MODE and hook != (c.get("hook") or ""):
                     db.set_hook(conn, c["id"], hook)
                 try:
+                    old_bounds = flags.get("review_bounds", [c["start_s"], c["end_s"]])
+                    if mode == stream_highlights.MODE and ([start, end] != old_bounds or hook != (c.get("hook") or "")):
+                        db.save_stream_review(conn, c["id"], start, end, hook)
                     with st.spinner("Rendering ..."):
                         # replace=True: re-rendering an unposted export (new hook, new cut) replaces it
                         res = pipeline.render_candidates(conn, cfg, src["id"], [c["id"]], platforms,
-                                                         hook=hook or None, replace=True, log=st.caption)
+                                                         hook=hook or None, layout_kind=layout_kind, replace=True, log=st.caption)
                     done = [r for r in res if r["path"] and not r["blocked_reason"]]
                     st.success(f"{len(done)} file(s) rendered")
                     for r in res:
@@ -90,8 +132,11 @@ for c in cands[:top_n]:
         with right:
             if st.toggle("Preview", key=f"prev_{c['id']}"):
                 with st.spinner("Cutting a preview ..."):
-                    proxy = pipeline.preview_proxy(cfg, src, c)
-                st.video(str(proxy))
+                    if 0 <= start < end <= src["duration"]:
+                        proxy = pipeline.preview_proxy(cfg, src, dict(c, start_s=start, end_s=end), layout_kind)
+                        st.video(str(proxy))
+                    else:
+                        st.warning("Check the preview bounds.")
             for e in db.list_exports(conn, candidate_id=c["id"]):
                 note = f" - BLOCKED: {e['blocked_reason']}" if e["blocked_reason"] else ""
                 post = db.post_for(conn, e["id"])

@@ -58,7 +58,7 @@ def plan_variants(
     cfg: dict,
     used_cuts: dict[str, list[tuple[float, float]]] | None = None,
     *, transcript: dict | None = None, cues: list[float] | None = None,
-    duration_limits: tuple[float, float] | None = None,
+    duration_limits: tuple[float, float] | None = None, protected: bool = False,
 ) -> list[Variant]:
     used_cuts = used_cuts or {}
     min_dist = float(cfg["variants"]["min_cut_distance_s"])
@@ -71,6 +71,9 @@ def plan_variants(
         pcfg = cfg["platforms"][platform]
         target = cfg["targets"][pcfg.get("target", "campaign")]
         min_s, max_s = float(target["min_s"]), float(pcfg.get("max_s", target["max_s"]))
+        if protected:
+            min_s = min(duration, float(cfg["stream_highlights"]["min_s"]))
+            max_s = min(float(cfg["stream_highlights"]["max_s"]), float(pcfg.get("max_s", duration)))
         if duration_limits:
             min_s = max(min_s, duration_limits[0])
             max_s = min(max_s, duration_limits[1])
@@ -86,6 +89,8 @@ def plan_variants(
             if s > peak - pre or any(abs(s - v.start) < min_dist for v in out):
                 continue
             for e, end_cost in ends:
+                if protected and (s > start or e < end):
+                    continue
                 if e < peak + post or not min_s <= e - s <= max_s:
                     continue
                 if any(abs(e - v.end) < min_dist for v in out):
@@ -93,9 +98,14 @@ def plan_variants(
                 if any(abs(s - us) < reuse_tol and abs(e - ue) < reuse_tol for us, ue in used_cuts.get(platform, [])):
                     continue
                 rank = (start_cost + end_cost, abs(s - start) + abs(e - end), s, e)
+                if protected:
+                    rank = (start - s + e - end, *rank)
                 if best is None or rank < best:
                     best, chosen = rank, (s, e)
         if chosen is None:
+            if protected:
+                raise ValueError(f"No {platform} cut fits the reviewed interval, duration limits and distinct-cut "
+                                 "rules. Review the bounds or render fewer platforms.")
             raise RuntimeError(f"could not plan distinct cuts for candidate {cand_id} on {platform}")
         out.append(Variant(
             platform=platform,

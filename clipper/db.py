@@ -213,21 +213,30 @@ def list_sources(conn: sqlite3.Connection) -> list[dict]:
 
 # --- candidates --------------------------------------------------------------------------------------------------
 
-def replace_candidates(conn: sqlite3.Connection, source_id: int, candidates: list[dict]) -> list[int]:
+def replace_candidates(conn: sqlite3.Connection, source_id: int, candidates: list[dict], mode: str = 'classic') -> list[int]:
     """Reuse matching moments and retain historical rows referenced by exports or edited hooks."""
     ids = []
     with conn:
         conn.execute("BEGIN IMMEDIATE")
         previous = _rows(conn.execute("SELECT * FROM candidates WHERE source_id=? ORDER BY id", (source_id,)))
-        conn.execute("UPDATE candidates SET rank=NULL WHERE source_id=?", (source_id,))
+        previous = [r for r in previous if (r.get("flags") or {}).get("mode", "classic") == mode]
+        conn.executemany("UPDATE candidates SET rank=NULL WHERE id=?", [(r["id"],) for r in previous])
         for rank, cand in enumerate(candidates, start=1):
             matches = [row for row in previous
                        if row["start_s"] <= cand["peak"] <= row["end_s"]
                        and cand["start"] <= row["peak_s"] <= cand["end"]]
-            values = (rank, cand["start"], cand["end"], cand["peak"], cand["score"],
-                      json.dumps(cand.get("signals", {})), json.dumps(cand.get("flags", {})), cand.get("text", ""))
+            matches = [r for r in matches if not (r.get("flags") or {}).get("review_bounds")
+                       or r["flags"]["review_bounds"][0] <= cand["peak"] < r["flags"]["review_bounds"][1]]
+            flags = dict(cand.get("flags") or {})
+            if mode != "classic":
+                flags["mode"] = mode
             if matches:
                 row = min(matches, key=lambda item: abs(item["peak_s"] - cand["peak"]))
+                if "review_bounds" in (row.get("flags") or {}):
+                    flags["review_bounds"] = row["flags"]["review_bounds"]
+            values = (rank, cand["start"], cand["end"], cand["peak"], cand["score"],
+                      json.dumps(cand.get("signals", {})), json.dumps(flags), cand.get("text", ""))
+            if matches:
                 previous.remove(row)
                 cid = row["id"]
                 conn.execute("UPDATE candidates SET rank=?, start_s=?, end_s=?, peak_s=?, score=?, signals=?, "
@@ -238,13 +247,29 @@ def replace_candidates(conn: sqlite3.Connection, source_id: int, candidates: lis
                                    "hook,source_id) VALUES (?,?,?,?,?,?,?,?,?,?)", (*values, cand.get("hook"), source_id))
                 cid = cur.lastrowid
             ids.append(cid)
-        conn.execute("DELETE FROM candidates WHERE source_id=? AND rank IS NULL AND hook_edited=0 AND "
-                     "NOT EXISTS (SELECT 1 FROM exports WHERE candidate_id=candidates.id)", (source_id,))
+        conn.executemany("DELETE FROM candidates WHERE id=? AND rank IS NULL AND hook_edited=0 AND "
+                         "NOT EXISTS (SELECT 1 FROM exports WHERE candidate_id=candidates.id)",
+                         [(r["id"],) for r in previous if "review_bounds" not in (r.get("flags") or {})])
     return ids
 
 
-def list_candidates(conn: sqlite3.Connection, source_id: int) -> list[dict]:
-    return _rows(conn.execute("SELECT * FROM candidates WHERE source_id = ? AND rank IS NOT NULL ORDER BY rank", (source_id,)).fetchall())
+def list_candidates(conn: sqlite3.Connection, source_id: int, mode: str = "classic") -> list[dict]:
+    rows = _rows(conn.execute("SELECT * FROM candidates WHERE source_id=? AND rank IS NOT NULL ORDER BY rank",
+                              (source_id,)))
+    return [r for r in rows if (r.get("flags") or {}).get("mode", "classic") == mode]
+
+
+def save_stream_review(conn, candidate_id: int, start: float, end: float, hook: str) -> None:
+    with conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = get_candidate(conn, candidate_id)
+        flags = row["flags"]
+        duration = get_source(conn, row["source_id"])["duration"]
+        if flags.get("mode") != "stream_highlights" or not 0 <= start <= row["peak_s"] < end <= duration:
+            raise ValueError("Review bounds must contain the peak and lie inside the recording")
+        flags["review_bounds"] = [start, end]
+        conn.execute("UPDATE candidates SET flags=?,hook=?,hook_edited=1 WHERE id=?",
+                     (json.dumps(flags), hook.strip() or None, candidate_id))
 
 
 def get_candidate(conn: sqlite3.Connection, candidate_id: int) -> dict:

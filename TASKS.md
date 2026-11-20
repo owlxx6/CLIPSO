@@ -2,6 +2,11 @@
 
 Shared log for the humans and agents working on this repo (see AGENTS.md). One task per agent at a time.
 
+## Stream Highlights V1
+
+- In review (Codex), branch `feat/stream-highlights-v1`, based on the verified November hardening branch. Optional CPU detector, separate rankings, preserved human edits, event-aware cuts, evidence and vertical review are implemented.
+- Human evaluation remains open. On the local 15-minute comparison both modes retrieved the two previously marked positive windows in their top ten. The new ranking moved them lower. Review the extended dialogue candidate and collect independent event, reaction and endpoint labels on held-out footage. [Benchmark and limitations](docs/STREAM_HIGHLIGHTS.md)
+
 ## Production hardening review
 
 - Feature branch `fix/production-hardening` includes the reviewed fixes, the repository verification/review skills and the remaining November 20 audit work. Cross-source labeling and sidecar-copy rollback now have regression tests.

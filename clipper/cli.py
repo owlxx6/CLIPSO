@@ -145,15 +145,18 @@ def cmd_sources(args) -> int:
 def cmd_analyze(args) -> int:
     conn, cfg, source = _open(args.source)
     pipeline.analyze(conn, cfg, args.source, transcribe=not args.no_transcribe, force=args.force,
-                     target=args.target)
-    _print_candidates(db.list_candidates(conn, args.source), db.list_labels(conn, args.source), args.top)
-    print(f"\nnext: clipper review   or   clipper render {args.source} --top 3")
+                     target=args.target, mode=args.mode)
+    _print_candidates(db.list_candidates(conn, args.source, args.mode or cfg["analysis"]["mode"]),
+                      db.list_labels(conn, args.source), args.top)
+    selected = args.mode or cfg["analysis"]["mode"]
+    print(f"\nnext: clipper review   or   clipper render {args.source} --mode {selected} --top 3")
     return 0
 
 
 def cmd_candidates(args) -> int:
-    conn, _, _ = _open(args.source)
-    _print_candidates(db.list_candidates(conn, args.source), db.list_labels(conn, args.source), args.top)
+    conn, cfg, _ = _open(args.source)
+    _print_candidates(db.list_candidates(conn, args.source, args.mode or cfg["analysis"]["mode"]),
+                      db.list_labels(conn, args.source), args.top)
     return 0
 
 
@@ -174,7 +177,7 @@ def cmd_layout(args) -> int:
 
 def cmd_render(args) -> int:
     conn, cfg, source = _open(args.source)
-    rows = db.list_candidates(conn, args.source)
+    rows = db.list_candidates(conn, args.source, args.mode or cfg["analysis"]["mode"])
     if args.ids:
         ids = [int(x) for x in args.ids.split(",")]
     else:
@@ -273,12 +276,12 @@ def _truth(conn, source_id: int, path: str | None) -> list[tuple[float, float]]:
 
 
 def cmd_eval(args) -> int:
-    conn, _, _ = _open(args.source)
+    conn, cfg, _ = _open(args.source)
     truth = _truth(conn, args.source, args.truth)
     if not truth:
         print("no ground truth: pass --truth FILE or label candidates as good in `clipper review`")
         return 1
-    rows = _cand_dicts(db.list_candidates(conn, args.source))
+    rows = _cand_dicts(db.list_candidates(conn, args.source, args.mode or cfg["analysis"]["mode"]))
     m = evaluate.evaluate(rows, truth, args.k)
     print(f"precision@{m['k']} = {m['precision']}   recall = {m['recall']}   f1 = {m['f1']}   "
           f"({m['truth']} marked highlights)")
@@ -363,11 +366,13 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--force", action="store_true", help="recompute generated transcripts, loudness and letterbox scans")
     s.add_argument("--target", default="campaign", help="clip length target from config (campaign, story)")
     s.add_argument("--top", type=int, default=15)
+    s.add_argument("--mode", choices=["classic", "stream_highlights"], help="candidate ranking to use")
     s.set_defaults(func=cmd_analyze)
 
     s = sub.add_parser("candidates", help="list candidates")
     s.add_argument("source", type=int)
     s.add_argument("--top", type=int, default=30)
+    s.add_argument("--mode", choices=["classic", "stream_highlights"], help="candidate ranking to use")
     s.set_defaults(func=cmd_candidates)
 
     s = sub.add_parser("layout", help="detect, set or preview the facecam layout")
@@ -391,6 +396,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--disclosure", action=argparse.BooleanOptionalAction, default=None,
                    help="show the paid-content tag (default from config)")
     s.add_argument("--layout", choices=["stacked", "blur_fit", "center_crop"])
+    s.add_argument("--mode", choices=["classic", "stream_highlights"], help="candidate ranking to use")
     s.set_defaults(func=cmd_render)
 
     s = sub.add_parser("exports", help="list rendered clips and whether they were posted")
@@ -424,6 +430,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("source", type=int)
     s.add_argument("--truth")
     s.add_argument("--k", type=int, default=10)
+    s.add_argument("--mode", choices=["classic", "stream_highlights"], help="candidate ranking to use")
     s.set_defaults(func=cmd_eval)
 
     s = sub.add_parser("tune", help="search signal weights that best match your ground truth")

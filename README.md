@@ -246,6 +246,14 @@ Put these in `config/streamers/<name>.yaml` (one streamer) or `config/local.yaml
 All settings and their defaults are in `clipper/defaults.yaml`. Lists replace the default list instead of
 adding to it.
 
+## Stream Highlights (GTA)
+
+Run `clipper analyze SOURCE --mode stream_highlights` to rank gameplay changes alongside possible reactions. The existing `classic` ranking and the Stream Highlights ranking can coexist for the same recording. Their candidate IDs and hooks are independent. Good/Bad labels remain attached to source times in both views.
+
+In `clipper review` choose **Stream Highlights**, inspect the time-stamped evidence and uncertainty, preview a vertical layout, and save the bounds and hook before exporting. A blank hook is supported. Use `clipper render SOURCE --mode stream_highlights --top 1 --platforms tiktok --layout stacked` for a local vertical file. The existing campaign and duplicate checks apply.
+
+The [Stream Highlights guide and benchmark](docs/STREAM_HIGHLIGHTS.md) contains the PowerShell walkthrough, supported configuration, comparison on a 15-minute recording, sources and limitations.
+
 ## Duplicate guard
 
 Before rendering, for each platform:

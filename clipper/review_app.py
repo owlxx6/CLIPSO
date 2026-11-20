@@ -68,7 +68,8 @@ for c in cands[:top_n]:
                 st.write(flags["reason"])
                 st.caption(" · ".join(f"{name.replace('_', ' ')} {media.fmt_ts(t) if t is not None else 'unobserved'}" for name,t in flags["timing"].items()))
                 with st.expander("Score and timed evidence"):
-                    st.json({"scores": c["signals"], "observations": flags["evidence"]})
+                    st.json({"measurements": c["signals"], "weighted_score": flags.get("contributions", {}),
+                             "observations": flags["evidence"]})
                 if flags["cut_risk"]:
                     st.warning("The ending or setup is uncertain. Check the surrounding footage.")
                 start = st.number_input("Start (seconds)", min_value=0., max_value=float(src["duration"]),

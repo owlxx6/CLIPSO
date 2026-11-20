@@ -241,7 +241,8 @@ def propose(features, transcript, duration, hop, cfg, top_k):
                 continue
             scores = {key: round(float(curve[idx]), 4) for key, curve in curves.items()}
             scores["context_completeness"] = 0.0 if risk else 1.0
-            total = sum(scores[key] * weights[key] for key in scores)
+            contributions = {key: value * weights[key] for key, value in scores.items()}
+            total = sum(contributions.values())
             evidence = {}
             for key, curve in {
                 **curves,
@@ -275,6 +276,7 @@ def propose(features, transcript, duration, hop, cfg, top_k):
                 confidence=confidence,
                 cut_risk=risk,
                 timing=timing,
+                contributions=contributions,
                 evidence=evidence,
                 hooks=_hooks(segments, start, end, peak),
                 boundary_cues=[round(float(t), 3) for t in cuts if start - 3 <= t <= end + 3],

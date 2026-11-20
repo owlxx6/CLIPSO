@@ -57,6 +57,7 @@ def test_synchronized_event_beats_laughter_and_narration(cfg):
     pair = ranked[0].flags["evidence"]["synchronized_pair"]
     assert (pair["game_time"], pair["response_time"], pair["response_channel"]) == (20, 21.5, "tracked_face")
     assert ranked[0].flags["hooks"] == []
+    assert round(sum(ranked[0].flags["contributions"].values()), 4) == ranked[0].score
     assert [c.as_dict() for c in ranked] == [c.as_dict() for c in proposals(cfg, f, segs)]
 
 
@@ -153,6 +154,7 @@ def test_mode_review_preview_and_vertical_render(source, cfg):
     assert top[:, :, 0].mean() > top[:, :, 2].mean() + 40
     assert frame[frame.shape[0] // 2 :].std() > 5
     (result,) = pipeline.render_candidates(conn, cfg, sid, [edited["id"]], ["tiktok"], layout_kind="stacked")
+    assert cli.main(["render", str(sid), "--ids", str(edited["id"]), "--mode", "classic"]) != 0
     assert result["layout"] == "stacked" and Path(result["path"]).is_file()
     assert result["start"] <= first - 0.25 and result["end"] >= last + 0.25 and result["hook"] is None
     assert result["highlight"]["mode"] == hunter.MODE and result["validation"]["technically_valid"]

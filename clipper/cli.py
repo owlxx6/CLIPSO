@@ -180,6 +180,11 @@ def cmd_render(args) -> int:
     rows = db.list_candidates(conn, args.source, args.mode or cfg["analysis"]["mode"])
     if args.ids:
         ids = [int(x) for x in args.ids.split(",")]
+        if args.mode:
+            for cid in ids:
+                flags = db.get_candidate(conn, cid).get("flags") or {}
+                if flags.get("mode", "classic") != args.mode:
+                    raise ValueError(f"candidate #{cid} does not belong to the requested {args.mode} ranking")
     else:
         labels = db.list_labels(conn, args.source)
         wanted = (1,) if args.good_only else (1, None)  # candidates labelled bad are never rendered

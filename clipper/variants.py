@@ -36,7 +36,7 @@ def _edge_options(anchor, other, peak, duration, min_s, max_s, radius, before, s
     word_edges = {s if before else e for s, e in nearby_words if near(s if before else e)}
     cues = {t for t in cues if near(t)}
     options = []
-    for t in sorted(grid | sentences | cues | word_edges):
+    for t in sorted(anchors | grid | sentences | cues | word_edges):
         if not 0 <= t <= duration or any(s < t < e for s, e in nearby_words):
             continue
         if before and t >= peak or not before and t <= peak:

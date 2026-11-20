@@ -3,7 +3,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from clipper import cli, db, layout, media, pipeline, stream_highlights as hunter
+from clipper import cli, db, layout, media, pipeline, stream_highlights as hunter, variants
 from clipper.signals import stream
 
 HOP = 0.5
@@ -136,16 +136,20 @@ def test_mode_review_preview_and_vertical_render(source, cfg):
     assert cli.main(["analyze", str(sid), "--mode", hunter.MODE, "--no-transcribe"]) == 0
     candidate = db.list_candidates(conn, sid, hunter.MODE)[0]
     first, last = candidate["start_s"], candidate["end_s"]
-    db.save_stream_review(conn, candidate["id"], first - 0.25, last + 0.25, "")
+    src = db.get_source(conn, sid)
+    with pytest.raises(ValueError, match="inside the recording"):
+        db.save_stream_review(conn, candidate["id"], first, src["duration"] + 0.25, "")
+    review_start = max(0, first - 0.25)
+    review_end = min(src["duration"], last + 0.25)
+    db.save_stream_review(conn, candidate["id"], review_start, review_end, "")
     db.add_label(conn, sid, first, last, 1)
     pipeline.analyze(conn, cfg, sid, transcribe=False, mode=hunter.MODE)
     assert db.list_candidates(conn, sid) == classic
     edited = db.get_candidate(conn, candidate["id"])
     assert edited["hook_edited"] and edited["hook"] is None
-    assert edited["flags"]["review_bounds"] == [first - 0.25, last + 0.25]
+    assert edited["flags"]["review_bounds"] == [review_start, review_end]
     assert len(db.list_labels(conn, sid)) == 1
-    src = db.get_source(conn, sid)
-    proxy = pipeline.preview_proxy(cfg, src, dict(edited, start_s=first - 0.25, end_s=last + 0.25), "stacked")
+    proxy = pipeline.preview_proxy(cfg, src, dict(edited, start_s=review_start, end_s=review_end), "stacked")
     info = media.probe(proxy)
     assert info["height"] > info["width"]
     frame = media.bgr_frame_at(proxy, 0.5, (info["width"], info["height"]), width=180)
@@ -156,7 +160,7 @@ def test_mode_review_preview_and_vertical_render(source, cfg):
     (result,) = pipeline.render_candidates(conn, cfg, sid, [edited["id"]], ["tiktok"], layout_kind="stacked")
     assert cli.main(["render", str(sid), "--ids", str(edited["id"]), "--mode", "classic"]) != 0
     assert result["layout"] == "stacked" and Path(result["path"]).is_file()
-    assert result["start"] <= first - 0.25 and result["end"] >= last + 0.25 and result["hook"] is None
+    assert result["start"] <= review_start and result["end"] >= review_end and result["hook"] is None
     assert result["highlight"]["mode"] == hunter.MODE and result["validation"]["technically_valid"]
     assert cli.main(["eval", str(sid), "--mode", hunter.MODE]) == 0
     assert cli.main(["candidates", str(sid), "--mode", hunter.MODE]) == 0
@@ -234,3 +238,8 @@ def test_hooks_abstain_on_punctuated_fragments_and_distant_speech():
                 utter(8, 10, "Pourquoi la voiture recule ?"),
                 utter(22, 24, "Regarde bien le panneau !")]
     assert hunter._hooks(segments, 0, 30, 7) == ["« Pourquoi la voiture recule ? »"]
+
+def test_protected_cut_can_end_exactly_at_a_fractional_source_duration(cfg):
+    duration = 180.00073
+    plan, = variants.plan_variants(1, 150., duration, 159., duration, ["tiktok"], cfg, protected=True)
+    assert plan.start == 150. and plan.end == duration

@@ -289,4 +289,39 @@ The first database connection migrates the original SQLite schema transactionall
 
 Rendering reuses the saved words for the same source file, including after a Whisper settings change. A speech candidate with missing transcript coverage stops before encoding when subtitles are enabled. Run `clipper analyze <id>` with Whisper enabled to regenerate speech.
 
-When a source has only a first-version `transcript.json`, CLIPSO adopts it as `transcript.imported.json` and keeps the original. To replace the adopted transcript with new speech recognition, move the imported copy aside and run `clipper analyze <id> --force` with Whisper enabled. Explicitly supplied transcripts take priority, including during forced analysis.
+An explicit import (`ingest --transcript FILE` or `clipper import-transcript SOURCE FILE`) binds the supplied words to the current recording's SHA-256. CLIPSO preserves that import through `analyze --force`. If the bytes change it ignores the import and warns. Unbound legacy files (`transcript.json` and `transcript.imported.json`) stay on disk. Check the original recording and the timing, then run `clipper import-transcript SOURCE FILE` to confirm the association. An enabled local transcriber can generate a separate cache. To deliberately retire a bound import, archive its `transcript.bound.json` and run `clipper analyze SOURCE --force`.
+
+## Campaign review
+
+Set `--campaign ID` at ingest. Put verified terms in `config/local.yaml` under the exact ID. Each export JSON includes its measured duration, recording and MP4 hashes, and a validation report. A known rights note allows local rendering. Submission readiness additionally requires permission evidence for that exact recording and verified terms. Unlisted or unimplemented requirements block readiness. For a restriction that needs interpretation, copy its exact text into `ai_restrictions` or `overlays` and have a reviewer attest to it for each export.
+
+This fictional example illustrates the configuration. Replace each value using the actual permission and brief. Empty lists mean the reviewer verified there are no requirements of that type. Explicit `null` for the duration range, deadline or disclosure means the brief has no such requirement. Use a null lower or upper bound for a one-sided duration rule. Paid exports still receive the advertising label.
+
+```yaml
+campaigns:
+  fixture-example:
+    terms_verified: true
+    terms_evidence: "local brief revision and date"
+    permission: verified
+    rights_evidence: "local permission record and scope"
+    recordings: ["full SHA-256 of the authorized recording"]
+    platforms: [tiktok]
+    duration_s: [18, 30]
+    hashtags: ["#example"]
+    mentions: ["@example"]
+    overlays: ["Approved corner logo"]
+    disclosure: "PUBLICITÉ"
+    ai_restrictions: ["Reviewer confirmed original speaker audio"]
+    deadline: "2027-01-01T12:00:00+00:00"
+    manual_review: true
+```
+
+Configure `captions.template` for campaign tags, then inspect the final MP4 and the caption `.txt`. Use `clipper campaign-check EXPORT_ID` to check the artifact, current terms and deadline. It prints JSON and exits 0 when ready, 1 when blocked. A missing historical receipt leaves technical validation unconfirmed. The command can be run on an existing export without rewriting its files.
+
+To attach a local review, copy the reported `export_key` and `policy_sha256` into a JSON evidence file. Add `reviewer`, a `human_approval` evidence reference, and arrays `overlays` and `ai_restrictions` containing exactly the requirements the reviewer verified. Re-run `clipper campaign-check EXPORT_ID --evidence review.json`. Keep the evidence and resulting report locally. Changes to the deliverable, caption or terms invalidate the earlier approval. Independent evidence references `submission`, `campaign_approval` and `payment` track downstream outcomes. `clipper posted` records a manual post and protects the file from replacement.
+
+## Evaluation and real-recording benchmark
+
+Precision@k is the number of matched events divided by the number of returned top-k predictions. Recall divides the matches by all labeled events. F1 is their harmonic mean. Empty denominators yield zero. Evaluation and tuning maximize the number of one-to-one matches, then favor peak containment, overlap (intersection over union), and proximity to the event center. Preserve the same labeled VOD, k and inputs when comparing runs.
+
+For the first authorized VOD, use the commands and holdout procedure in the [production hardening report](docs/PRODUCTION_HARDENING_REPORT.md#controlled-gta-benchmark). The [GitHub test workflow](.github/workflows/test.yml) runs the offline synthetic suite on Python 3.11 for Linux and Windows.

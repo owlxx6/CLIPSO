@@ -2,18 +2,16 @@
 
 Shared log for the humans and agents working on this repo (see AGENTS.md). One task per agent at a time.
 
-## In progress
+## Production hardening review
 
-- **2026-11-20 · Ready for review on `fix/review-2026-11-20`.** Completed issues 1–6. Rendering reuses same-source speech after a Whisper setting change and checks caption coverage. Legacy speech is adopted and can be regenerated. Migration distinguishes reproducible auto hooks from manual or uncertain hooks. Replacement tolerates locked old files and reports them. OpenCV still images support Unicode paths. Paid exports use the configured disclosure with a default for empty text.
-- Added the repository skills `clipper-verify` and `clipper-review` and validated both skill definitions.
-- **Verification.** Windows, Python 3.13.17, FFmpeg 4.4.1 and libx264. All 78 tests passed with zero skips. Doctor reported ready. The synthetic demo reached precision@3 and recall of 1.0 and produced six 1080×1920 exports with audio, covers and sidecars. A separate CLI run adopted a first-version transcript and rendered a synthetic campaign with `--no-disclosure`. The inspected frame showed the configured `PARTENARIAT RÉMUNÉRÉ` label, hook and highlighted word. Speech verification used fixture transcripts and a controlled transcriber.
+- Feature branch `fix/production-hardening` includes the reviewed fixes, the repository verification/review skills and the remaining November 20 audit work. Cross-source labeling and sidecar-copy rollback now have regression tests.
+- Imported transcript reuse requires explicit recording identity. Global highlight evaluation, deterministic speech-aware platform cuts, streamed FFmpeg failure detection and campaign evidence checks are implemented.
+- All 127 tests passed locally on Windows with zero skips. Track the Python 3.11 Linux/Windows checks and the six-export demo in the [hardening report](docs/PRODUCTION_HARDENING_REPORT.md). The first authorized real-recording benchmark is pending access to recordings, complete event labels and verified campaign terms.
+- Phase 3 begins with a single-cut EditPlan round trip through the existing renderer and an ExportReceipt replay check. Evaluate pacing and facecam experiments separately after measuring the current editor on the held-out recordings.
 
-### Open findings from the 20 November review
+## November 20 review history
 
-| Priority | Reproduced behavior | Acceptance test for a follow-up |
-|---|---|---|
-| P2 | [CLI labeling](clipper/cli.py#L224) accepts a candidate from source A when the command specifies source B. It returned success and wrote the label to B, which can distort evaluation and tuning. | Mismatched source and candidate IDs return an error and neither source gains a label. A matching pair still succeeds. |
-| P2 | [Ingestion](clipper/pipeline.py#L51) checks that sidecars exist, then commits the source before copying them. A simulated copy permission error on an existing chat file left one source row. | Inject a sidecar copy failure and verify that no source or partial sidecar is visible. Retrying creates one complete source. |
+The earlier `fix/review-2026-11-20` branch passed 78 synthetic tests, including the original stabilization probes. It preserved edited hooks, made Unicode image paths work, used the configured paid label and handled locked replacement files. This sprint supersedes automatic legacy transcript adoption with explicit operator binding.
 
 ## Next, in order
 

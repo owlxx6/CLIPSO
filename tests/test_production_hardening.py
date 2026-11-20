@@ -85,6 +85,16 @@ def test_partial_stream_then_failed_process_reports_stderr(monkeypatch):
         next(chunks)
 
 
+def test_zero_exit_with_error_diagnostic_is_a_failed_decode(monkeypatch, tmp_path):
+    original = media.subprocess.Popen
+    def warned(*args, **kwargs):
+        code = "import sys; sys.stdout.buffer.write(b'abcd'); sys.stderr.write('[error] partial file')"
+        return original([sys.executable, "-c", code], **kwargs)
+    monkeypatch.setattr(media.subprocess, "Popen", warned)
+    with pytest.raises(media.MediaError, match="partial file"):
+        list(media.pcm_chunks(tmp_path / "synthetic.mp4"))
+
+
 def test_sparse_keyframes_have_presentation_times(tmp_path):
     path = tmp_path / "irregular.mp4"
     media.run([media.ffmpeg_bin(), "-v", "error", "-f", "lavfi", "-i", "testsrc2=s=64x48:r=10:d=6",

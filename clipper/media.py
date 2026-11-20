@@ -96,17 +96,45 @@ def sha256_file(path: str | Path) -> str:
     return digest.hexdigest()
 
 
+def _check_mp4_extent(path: str | Path) -> None:
+    """Check declared top-level box sizes with seeks. Some demuxers return success on a short final mdat."""
+    with open(path, "rb") as stream:
+        length = os.fstat(stream.fileno()).st_size
+        header = stream.read(8)
+        if header[4:] != b"ftyp":
+            return
+        offset = 0
+        while offset < length:
+            if len(header) != 8:
+                raise MediaError("Truncated MP4 box header")
+            size = int.from_bytes(header[:4], "big")
+            header_size = 8
+            if size == 0:  # extends to EOF
+                return
+            if size == 1:  # extended 64-bit box length
+                size = int.from_bytes(stream.read(8), "big")
+                header_size = 16
+            if size < header_size or size > length - offset:
+                raise MediaError(f"Truncated or invalid MP4 box {header[4:]!r} at byte {offset}")
+            offset += size
+            stream.seek(offset)
+            header = stream.read(8)
+
+
 @contextmanager
-def _decode(cmd: list[str], timestamps: bool = False):
+def _decode(cmd: list[str], path: str | Path, timestamps: bool = False):
     """Drain diagnostics concurrently and reap the decoder on EOF, exceptions and early close."""
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     assert proc.stdout is not None and proc.stderr is not None
     tail = deque(maxlen=12)
     times = queue.Queue()
+    error_lines = deque(maxlen=4)
 
     def drain():
         for raw in proc.stderr:
             line = raw.decode("utf-8", errors="replace").strip()
+            if re.match(r"^(?:\[[^\]]+\] )?\[(?:error|fatal|panic)\](?: |$)", line):
+                error_lines.append(line)
             if timestamps and "Parsed_showinfo" in line:
                 stamp = re.search(r"\bpts_time:\s*([-+.\deE]+)", line)
                 if stamp:
@@ -121,8 +149,9 @@ def _decode(cmd: list[str], timestamps: bool = False):
         yield proc.stdout, times
         code = proc.wait()
         reader.join()
-        if code:
-            raise MediaError(f"FFmpeg decode failed ({code}): " + "\n".join(tail))
+        if code or error_lines:
+            raise MediaError(f"FFmpeg decode failed ({code}): " + "\n".join(error_lines or tail))
+        _check_mp4_extent(path)
     finally:
         if proc.poll() is None:
             proc.kill()
@@ -134,10 +163,10 @@ def _decode(cmd: list[str], timestamps: bool = False):
 
 def pcm_chunks(path: str | Path, sample_rate: int = 16000, chunk_bytes: int = 1 << 20) -> Iterator[bytes]:
     """Stream mono PCM. A missing stream or incomplete decode is an error."""
-    cmd = [ffmpeg_bin(), "-nostdin", "-v", "error", "-xerror", "-i", str(path), "-map", "0:a:0",
+    cmd = [ffmpeg_bin(), "-nostdin", "-v", "level+error", "-xerror", "-i", str(path), "-map", "0:a:0",
            "-ac", "1", "-ar", str(sample_rate), "-f", "s16le", "-"]
     total = 0
-    with _decode(cmd) as (stream, _):
+    with _decode(cmd, path) as (stream, _):
         for chunk in iter(lambda: stream.read(chunk_bytes), b""):
             total += len(chunk)
             yield chunk
@@ -159,7 +188,7 @@ def gray_frames(
     """Regular samples use the output grid. Sparse samples carry their decoded presentation time."""
     if fps <= 0 or min(width, height) <= 0:
         raise ValueError("positive fps and dimensions required")
-    cmd = [ffmpeg_bin(), "-nostdin", "-nostats", "-v", "info" if keyframes_only else "error", "-xerror"]
+    cmd = [ffmpeg_bin(), "-nostdin", "-nostats", "-v", "level+info" if keyframes_only else "level+error", "-xerror"]
     if keyframes_only:
         cmd += ["-skip_frame", "nokey"]
     if start is not None:
@@ -177,7 +206,7 @@ def gray_frames(
     cmd += ["-threads:v", "1", "-f", "rawvideo", "-pix_fmt", "gray", "-"]
     size = width * height
     count = 0
-    with _decode(cmd, keyframes_only) as (stream, times):
+    with _decode(cmd, path, keyframes_only) as (stream, times):
         for buf in iter(lambda: stream.read(size), b""):
             if len(buf) != size:
                 raise MediaError("FFmpeg returned a partial video frame")

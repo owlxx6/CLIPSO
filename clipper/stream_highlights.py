@@ -20,22 +20,31 @@ def _complete(text):
     return bool(re.search(r"[.!?…][»”'\" )]*$", text.strip()))
 
 
+# Restrict automatic quotes to recognizable question or imperative forms in the supported languages.
+# Raw ASR often punctuates a chain of unrelated fragments as one sentence.
+_QUESTION = re.compile(
+    r"^(?:qu['’](?:est-ce|as|avez)|que |qui |quoi |où |pourquoi |comment |quand |est-ce |"
+    r"tu (?:sais|veux|as|penses) |vous (?:voulez|avez|savez) |what |where |who |why |when |how |"
+    r"(?:did|do|can|are) you )", re.I)
+_IMPERATIVE = re.compile(r"^(?:regardez?|écoutez?|attendez|watch|look|listen)\b", re.I)
+
+
 def _hooks(segments, start, end, peak):
-    """Quote whole short utterances only. Never infer a particular action or speaker."""
+    """Quote one intact utterance near the evidence peak or leave the hook empty."""
     suggestions = []
     for seg in sorted(segments, key=lambda s: abs((s["start"] + s["end"]) / 2 - peak)):
         text = " ".join(seg["text"].split())
-        if (
-            start <= seg["start"]
-            and seg["end"] <= end
-            and 3 <= len(text.split()) <= 14
-            and _complete(text)
-            and text[0].isupper()
-            and len(set(text.casefold().split())) >= 3
-        ):
-            quote = f"« {text} »"
-            if quote not in suggestions:
-                suggestions.append(quote)
+        if not (start <= seg["start"] < seg["end"] <= end and seg["start"]-6 <= peak <= seg["end"]+6):
+            continue
+        if not 3 <= len(text.split()) <= 14 or not _complete(text) or not text[0].isupper():
+            continue
+        if re.search(r"[.!?…]", text[:-1]) or len(set(text.casefold().split())) < 3:
+            continue
+        if not (_IMPERATIVE.match(text) or (text.endswith("?") and _QUESTION.match(text))):
+            continue
+        quote = f"« {text} »"
+        if quote not in suggestions:
+            suggestions.append(quote)
         if len(suggestions) == 3:
             break
     return suggestions

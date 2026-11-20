@@ -21,7 +21,7 @@ $id = [int](Read-Host "Source ID printed by ingest")
 & $py -m clipper review
 ```
 
-For a source already registered in this checkout, use its existing ID. To inspect another checkout's data in isolation, copy the database using SQLite backup, the source sidecars and relevant configuration to a separate CLIPPER_HOME. For timed speech, use `ingest --transcript FILE`, or bind a verified transcript with `clipper import-transcript $id FILE`. With faster-whisper and a local model installed, omit `--no-transcribe` to generate words. The review app's Analyze button reuses available speech and works offline.
+Keep each application's writable database with its own checkout when comparing V1 with an older release. For a source already registered in this checkout, use its existing ID. To inspect another checkout's data in isolation, copy the database using SQLite backup, the source sidecars and relevant configuration to a separate CLIPPER_HOME. For timed speech, use `ingest --transcript FILE`, or bind a verified transcript with `clipper import-transcript $id FILE`. With faster-whisper and a local model installed, omit `--no-transcribe` to generate words. The review app's Analyze button reuses available speech and works offline.
 
 Automatic facecam detection uses the bundled YuNet detector (or the existing OpenCV fallback). If necessary, inspect the frame and enter the actual normalized overlay rectangle for that recording.
 
@@ -51,7 +51,7 @@ Choose `--layout center_crop` for a classic vertical crop or `blur_fit` to keep 
 | Gameplay | The fraction of changed pixels outside the camera overlay, its deviation from local activity and the distance between successive grayscale histograms. Cuts, camera motion, menus and flashes can all produce strong responses. |
 | Synchronization | A visual event paired with audio or tracked-face activity in a configurable following window. The report stores both timestamps, response channel and strength. |
 | Narrative and context | An adjacent question and complete response, transcribed utterance limits, speech pauses, shot-change cues and settling time. A bounded gap in unfinished dialogue can be bridged when activity continues without a detected shot change. |
-| Hooks | Complete, short transcript quotations within the retained window, ordered by proximity to the event. Incomplete or weak evidence can leave all three slots empty. |
+| Hooks | Complete, short questions or imperatives with recognizable French or English openings, within six seconds of the measured peak. Multi-sentence fragments are excluded. Incomplete or weak evidence can leave all three slots empty. |
 
 Scores use the weights in `stream_highlights.weights`. They combine audio reaction, facecam activity, gameplay activity, event/reaction synchronization, narrative coherence, novelty and context completeness. The review view and export metadata retain each weighted contribution from the analysis run. Their sum recovers the reported total to the displayed precision. The reported confidence is a qualitative heuristic. A chaos label requires both a spoken event term and synchronized observations. The underlying event and the speaker's emotion still require review. Colour-only changes, occlusion, game voices and inaccurate ASR can all affect the result.
 
@@ -70,7 +70,7 @@ The comparison used a private SQLite backup, the same source, its existing timed
 | Stream Highlights, first activity scan | 29 | 03:16.2, 01:35.2, 06:12.2 | 03:13.0–03:35.2 | 5.34 s | 93 MiB |
 | Stream Highlights, cached activity | 29 | Same order | Same interval | 0.39 s | 45 MiB |
 
-The initial campaign interval reported by the tester was 06:34–06:57. The active local settings reproduced the reported story interval and produced the campaign interval in the table. At rank 11, Stream Highlights retained **06:34.81–07:39.03** around the dialogue, including 16.01 seconds after the previous story ending. It flagged the uncertain conclusion. Its first-ranked candidate had a gameplay change at 03:16.0 and possible mixed-audio response at 03:16.5. Twenty-one of 29 candidates had no automatic hook.
+The initial campaign interval reported by the tester was 06:34–06:57. The active local settings reproduced the reported story interval and produced the campaign interval in the table. At rank 11, Stream Highlights retained **06:34.81–07:39.03** around the dialogue, including 16.01 seconds after the previous story ending. It flagged the uncertain conclusion. Its first-ranked candidate had a gameplay change at 03:16.0 and possible mixed-audio response at 03:16.5. Twenty-seven of 29 candidates had no automatic hook. The top candidate had a punctuated but disfluent ASR passage, so the hook was left empty.
 
 The two marked positive windows appeared at ranks 2 and 4 in both classic runs and ranks 6 and 10 in Stream Highlights. Two other windows were labeled negative. These sparse annotations do not establish precision over all proposals. A human editor still needs to judge whether the longer dialogue cut resolves the scene and whether the new top moments merit export.
 

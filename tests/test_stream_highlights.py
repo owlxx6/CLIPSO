@@ -74,7 +74,7 @@ def test_delayed_response_and_setup_are_preserved(cfg):
     c = proposals(cfg, f, segs)[0]
     assert c.start <= 14 and c.end >= 39 and c.end < 43
     assert c.flags["cut_risk"]  # continuity across a long uncertain dialogue gap needs review
-    assert all(any(s["text"] in quote for s in segs) for quote in c.flags["hooks"])
+    assert c.flags["hooks"] and all(any(s["text"] in quote for s in segs) for quote in c.flags["hooks"])
 
 
 @pytest.mark.parametrize("at", [0, 199])
@@ -228,3 +228,9 @@ def test_review_screen_saves_cuts_and_removes_hook(source, cfg):
     assert not app.exception
     saved = db.get_candidate(conn, cid)
     assert saved["flags"]["review_bounds"] == [12, 29] and saved["hook"] is None
+
+def test_hooks_abstain_on_punctuated_fragments_and_distant_speech():
+    segments = [utter(4, 6, "Ah ! Je reprends, on était à quoi ?"),
+                utter(8, 10, "Pourquoi la voiture recule ?"),
+                utter(22, 24, "Regarde bien le panneau !")]
+    assert hunter._hooks(segments, 0, 30, 7) == ["« Pourquoi la voiture recule ? »"]

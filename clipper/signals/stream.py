@@ -9,7 +9,10 @@ import numpy as np
 
 from clipper import layout, media
 from clipper.signals import rolling_median, timeline_len
+from clipper.signals import payoff
 from clipper.signals import transcript as tr
+
+CAMERA_TYPES = ("unknown", "gameplay_only", "webcam", "full_body", "screen_reaction", "avatar")
 
 
 def usable_transcript(data: dict | None, duration: float) -> dict | None:
@@ -112,8 +115,12 @@ def audio_features(db, transcript, duration, hop, cfg, keywords, pitch=None):
     for t, _ in tr.keyword_hits(words, cfg["chaos_terms"]):
         chaos_words[min(n - 1, max(0, int(t / hop)))] = 1
     laughter = np.zeros(n, dtype=np.float32)
+    timed_words = {w["start"]: w["end"] for seg in (transcript or {}).get("segments", [])
+                   for w in seg.get("words", [])}
     for t, _ in tr.keyword_hits(words, keywords["laughter"]):
-        laughter[min(n - 1, max(0, int(t / hop)))] = 1
+        i = min(n - 1, max(0, int(t / hop)))
+        # A word with observed timestamps can remain present across a plateau.
+        laughter[i:max(i + 1, math.ceil(timed_words.get(t, t) / hop))] = 1
     # Mixed audio alone gives weak evidence. ASR cannot identify which speaker spoke.
     reaction = np.maximum(energy * (0.18 + 0.60 * speech), exclamation * (0.60 + 0.40 * energy))
     reaction = np.maximum(reaction, np.maximum(laughter * 0.90, rate * energy))
@@ -155,7 +162,8 @@ def _track_face(roi, finder, previous):
     return box, float(quality)
 
 
-def visual_features(source: dict, facecam: dict | None, duration: float, hop: float, cfg: dict) -> dict:
+def visual_features(source: dict, facecam: dict | None, duration: float, hop: float, cfg: dict,
+                    reference=None) -> dict:
     """Stream downsized grayscale samples. Exclude the whole camera overlay from gameplay measurements."""
     n = timeline_len(duration, hop)
     width = min(int(cfg["scan_width"]), int(source["width"]))
@@ -163,21 +171,44 @@ def visual_features(source: dict, facecam: dict | None, duration: float, hop: fl
     fps = min(float(cfg["sample_fps"]), 1 / hop)
     mask = np.ones((height, width), dtype=bool)
     finder = None
-    if facecam:
+    camera = cfg["camera_type"]
+    if facecam and camera != "gameplay_only":
         x, y, w, h = (facecam[k] for k in ("x", "y", "w", "h"))
         roi = np.s_[
             max(0, int(y * height)) : min(height, math.ceil((y + h) * height)),
             max(0, int(x * width)) : min(width, math.ceil((x + w) * width)),
         ]
         mask[roi] = False
-        finder = layout.FaceFinder()
+        if camera == "webcam":
+            finder = layout.FaceFinder()
+    measure_game = camera != "screen_reaction" and (camera not in {"avatar", "full_body"} or facecam is not None)
+    if reference is not None and measure_game:
+        x, y, w, h = cfg["result_card"]["roi"]
+        card_roi = np.s_[int(y*height):math.ceil((y+h)*height), int(x*width):math.ceil((x+w)*width)]
+        if not mask[card_roi].all():
+            raise ValueError("result_card ROI overlaps the camera overlay")
+        rh, rw = mask[card_roi].shape
+        reference = cv2.resize(reference, (rw, rh), interpolation=cv2.INTER_AREA)
+        if min(rh, rw) < 3 or reference.std() < 5:
+            raise ValueError("result_card ROI has too little detail at scan_width")
+        mask[card_roi] = False  # a HUD or result update alone cannot seed a proposal
     raw, scene, face, confidence = (np.zeros(n, np.float32) for _ in range(4))
-    prev_frame = prev_hist = prev_box = None
+    visible = np.zeros(n, dtype=bool)
+    hold = payoff.PictureHold(cfg, n)
+    histograms, indices = [], []
+    prev_frame = prev_pixels = prev_hist = prev_box = None
     prev_quality = 0.0
     for t, frame in media.gray_frames(source["path"], fps, width, height):
         i = min(n - 1, int(round(t / hop)))
         pixels = frame[::4, ::4][mask[::4, ::4]]
         hist = np.histogram(pixels, bins=16, range=(0, 256))[0] / max(1, pixels.size)
+        histograms.append(hist)
+        indices.append(i)
+        if reference is not None and measure_game:
+            similarity = cv2.matchTemplate(frame[card_roi], reference, cv2.TM_CCOEFF_NORMED)[0, 0]
+            visible[i] = similarity >= cfg["result_card"]["similarity"]
+        if pixels.size and measure_game:
+            hold.observe(i, pixels, prev_pixels, hop, t)
         if prev_frame is not None and pixels.size:
             delta = cv2.absdiff(frame, prev_frame)[::4, ::4][mask[::4, ::4]]
             raw[i] = np.mean(delta > 20)
@@ -197,16 +228,19 @@ def visual_features(source: dict, facecam: dict | None, duration: float, hop: fl
                 if motion < 0.35 and change is not None:
                     face[i] = min(1, change.mean() / 32 + motion * 2) * min(quality, prev_quality)
             prev_box, prev_quality = box, quality
-        prev_frame, prev_hist = frame, hist
+        prev_frame, prev_pixels, prev_hist = frame, pixels, hist
     stride = max(1, round(1 / (fps * hop)))
     typical = rolling_median(raw[::stride], max(3, round(cfg["baseline_s"] * fps)))
     background = np.repeat(typical, stride)[:n]
     novelty = np.clip((raw - background) / cfg["motion_rise"], 0, 1)
     game = np.maximum(novelty * np.clip(raw / 0.18, 0, 1), np.clip(scene / cfg["scene_change"], 0, 1))
     return dict(
-        gameplay_activity=game,
+        gameplay_activity=game if measure_game else np.zeros_like(game),
         scene_change=scene,
-        novelty=novelty,
+        hard_cut=payoff.hard_cuts(histograms, indices, cfg["hard_cut"], n),
+        quiet_hold_until=hold.until,
+        result_visible=payoff.confirmed_card_samples(visible, indices, hop, cfg["hold_s"]),
+        novelty=novelty if measure_game else np.zeros_like(novelty),
         facecam_activity=face,
         facecam_confidence=confidence,
     )

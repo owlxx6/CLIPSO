@@ -14,6 +14,7 @@ from clipper import __version__, campaign, config, db, evaluate, fixture, media,
 from clipper import layout as layout_mod
 from clipper.config import FONTS_DIR
 from clipper.signals import transcript as tr
+from clipper.signals.stream import CAMERA_TYPES
 
 PLATFORMS_DEFAULT = "tiktok,instagram,youtube"
 
@@ -162,11 +163,19 @@ def cmd_candidates(args) -> int:
 
 def cmd_layout(args) -> int:
     conn, cfg, source = _open(args.source)
+    wd = pipeline.workdir(cfg, source["id"])
     if args.set or args.kind:
-        lay = pipeline.set_layout(cfg, source, args.kind, layout_mod.parse_box(args.set) if args.set else None)
+        lay = pipeline.set_layout(cfg, source, args.kind, layout_mod.parse_box(args.set) if args.set else None,
+                                  camera_type=args.camera_type)
+    elif args.detect or not args.camera_type:
+        lay = pipeline.ensure_layout(cfg, source, force=args.detect, camera_type=args.camera_type)
     else:
-        lay = pipeline.ensure_layout(cfg, source, force=args.detect)
+        saved = layout_mod.load_layout(wd) or {}
+        layout_mod.save_layout(wd, dict(saved, camera_type=args.camera_type))
+        lay = layout_mod.resolve(cfg, wd)
     print(f"layout: {lay['kind']}  facecam: {lay.get('facecam')}")
+    if args.camera_type:
+        print(f"Stream Highlights camera type: {args.camera_type}")
     if args.preview:
         t = args.at if args.at is not None else float(source["duration"]) / 2
         png = layout_mod.preview(source["path"], t, (int(source["width"]), int(source["height"])), lay, cfg,
@@ -383,6 +392,7 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("layout", help="detect, set or preview the facecam layout")
     s.add_argument("source", type=int)
     s.add_argument("--detect", action="store_true", help="run facecam detection again")
+    s.add_argument("--camera-type", choices=CAMERA_TYPES, help="record the camera type for Stream Highlights analysis")
     s.add_argument("--set", help="facecam box x,y,w,h as fractions of the frame")
     s.add_argument("--kind", choices=["stacked", "blur_fit", "center_crop"])
     s.add_argument("--preview", help="write a PNG with the boxes drawn")

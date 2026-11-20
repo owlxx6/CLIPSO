@@ -8,6 +8,7 @@ import re
 import numpy as np
 
 from clipper.detect import Candidate
+from clipper.signals.payoff import card_appearances
 from clipper.signals import transcript as tr
 
 MODE = "stream_highlights"
@@ -50,11 +51,11 @@ def _hooks(segments, start, end, peak):
     return suggestions
 
 
-def _timing(segments, first, last, peak, duration, cfg, cuts, gameplay, hop):
-    setup = max(0.0, first - cfg["setup_margin_s"])
-    end = min(duration, last + cfg["settle_s"])
-    earliest = max(0, first - cfg["max_setup_s"])
-    nearby = [s for s in segments if s["end"] >= earliest and s["start"] <= setup + cfg["max_s"]]
+def _timing(segments, first, last, peak, duration, cfg, cuts, gameplay, hop, scene_start, ceiling):
+    setup = max(scene_start, first - cfg["setup_margin_s"])
+    end = min(ceiling, last + cfg["settle_s"])
+    earliest = max(scene_start, first - cfg["max_setup_s"])
+    nearby = [s for s in segments if s["end"] >= earliest and s["start"] < min(ceiling, setup + cfg["max_s"])]
     bridged = False
 
     def continuing_picture(left, right):
@@ -71,15 +72,15 @@ def _timing(segments, first, last, peak, duration, cfg, cuts, gameplay, hop):
         possible_setup = not _complete(seg["text"]) and continuing_picture(seg["end"], setup)
         if seg["start"] < setup and (ordinary_gap or possible_setup):
             if seg["start"] >= earliest or seg["end"] > setup:
-                setup = seg["start"]
+                setup = max(scene_start, seg["start"])
                 bridged |= not ordinary_gap
     # Prefer the nearest pre-event shot boundary in a speech-free gap.
     if not any(s["start"] <= first and s["end"] >= setup for s in nearby):
         setup = max((t for t in cuts if earliest <= t <= first), default=setup)
-    limit = min(duration, setup + cfg["max_s"])
+    limit = min(ceiling, setup + cfg["max_s"])
     if limit <= peak:  # a single long ASR segment must not displace the event
-        setup = max(0, first - cfg["setup_margin_s"])
-        limit = min(duration, setup + cfg["max_s"])
+        setup = max(scene_start, first - cfg["setup_margin_s"])
+        limit = min(ceiling, setup + cfg["max_s"])
     risk = end > limit
     end = min(end, limit)
     last_segment = next(
@@ -88,6 +89,11 @@ def _timing(segments, first, last, peak, duration, cfg, cuts, gameplay, hop):
     for seg in nearby:
         if seg["end"] < last or seg["end"] <= setup:
             continue
+        if (last_segment and _complete(last_segment["text"]) and seg["start"] >= last
+                and seg["start"] - last_segment["end"] >= cfg["topic_pause_s"]):
+            ceiling = min(ceiling, seg["start"])
+            limit, end = min(limit, ceiling), min(end, ceiling)
+            break
         if seg["start"] > end + cfg["speech_pause_s"]:
             if (
                 bridged
@@ -112,7 +118,7 @@ def _timing(segments, first, last, peak, duration, cfg, cuts, gameplay, hop):
         risk = True
     minimum = min(duration, cfg["min_s"])
     end = min(limit, max(end, setup + minimum))
-    setup = max(0, min(setup, end - minimum))
+    setup = max(scene_start, min(setup, end - minimum))
     # Prefer the gap or word edge on the safe side of the cap.
     for seg in nearby:
         if seg["start"] < end < seg["end"]:
@@ -127,8 +133,64 @@ def _timing(segments, first, last, peak, duration, cfg, cuts, gameplay, hop):
                     setup = word["start"] if end - word["start"] <= cfg["max_s"] else word["end"]
                     risk = True
                     break
-    risk = risk or bridged or first <= 0 or end >= duration - 0.01 or last >= limit - cfg["settle_s"]
-    return setup, end, bool(risk)
+    risk = risk or bridged or first <= 0 or end >= duration - 0.01 or last > limit
+    return max(scene_start, setup), min(ceiling, end), bool(risk), ceiling
+
+
+def _response_pairs(features, scene_id, hop, cfg):
+    """Extend the usual forward window only for a corroborated response in an uninterrupted shot."""
+    g, a, f = (features[k] for k in ("gameplay_activity", "audio_reaction", "facecam_activity"))
+    reaction = np.maximum(a, f)
+    corroborated = np.maximum.reduce([
+        features["laughter_cue"], np.minimum(f, features["facecam_confidence"]),
+        np.minimum(features["speech"], features["energy_rise"]),
+        features.get("voiced_rise", np.zeros_like(g)),
+    ]) >= cfg["evidence_floor"]
+    # A later game event gets first claim on a delayed response.
+    recent = np.maximum.accumulate(np.where(g >= cfg["evidence_floor"], np.arange(len(g)), -1))
+    sync = np.zeros_like(g)
+    lags = np.zeros(len(g), dtype=int)
+    longest = max(cfg["sync_s"], cfg["delayed_sync_s"])
+    for lag in range(min(len(g), math.floor(longest / hop) + 1)):
+        count = len(g) - lag
+        allowed = scene_id[:count] == scene_id[lag:]
+        if lag * hop > cfg["sync_s"]:
+            allowed &= corroborated[lag:] & (recent[lag:] <= np.arange(count))
+        joint = np.where(allowed, np.minimum(g[:count], reaction[lag:]), 0)
+        better = joint > sync[:count]
+        lags[:count][better] = lag
+        np.maximum(sync[:count], joint, out=sync[:count])
+    return sync, lags
+
+
+def _laugh_endpoints(features, scene_id, hop, cfg):
+    """Link timed markers through silence, never across speech, a competing event or a cut."""
+    marked = np.flatnonzero(features["laughter_cue"])
+    ends = np.zeros(len(scene_id), dtype=int)
+    if not marked.size:
+        return ends
+    interruptions = np.cumsum((features["speech"] > 0) | (features["gameplay_activity"] >= cfg["evidence_floor"]))
+    left, right = marked[:-1], marked[1:]
+    split = ((right-left-1) * hop > cfg["repeat_laugh_gap_s"]) | (scene_id[right] != scene_id[left])
+    split |= interruptions[right-1] != interruptions[left]
+    for episode in np.split(marked, np.flatnonzero(split) + 1):
+        ends[episode] = episode[-1]
+    return ends
+
+
+def _payoff_observation(cards, held, idx, last, stop, hop, cfg):
+    """Look only near an existing event. Keep reading time bounded even for a permanent display."""
+    upper = min(stop, math.floor((last + cfg["payoff_search_s"]) / hop) + 1)
+    for at in range(idx, upper):
+        if at in cards:
+            return "matched result card", at * hop, min(cards[at], stop * hop)
+    if held is not None:
+        appearances = np.flatnonzero(held[idx:upper] > 0) + idx
+        if appearances.size:
+            later = appearances[appearances * hop >= last]
+            at = int(later[0] if later.size else appearances[-1])
+            return "held visual change", at * hop, min(float(held[at]), stop * hop)
+    return "unconfirmed", None, None
 
 
 def _event_parts(group, strength, max_ticks):
@@ -153,6 +215,8 @@ def _interpret(features, idx, part, response_idx, sync_strength, narrative, hop,
         evidence["synchronized_pair"] = {
             "game_time": round(idx * hop, 3),
             "response_time": round(response * hop, 3),
+            "delay_s": round((response - idx) * hop, 3),
+            "window": "delayed" if (response - idx) * hop > cfg["sync_s"] else "ordinary",
             "response_channel": "tracked_face"
             if features["facecam_activity"][response] > features["audio_reaction"][response]
             else "mixed_audio",
@@ -185,14 +249,19 @@ def propose(features, transcript, duration, hop, cfg, top_k):
     a, f, g = (features[k] for k in ("audio_reaction", "facecam_activity", "gameplay_activity"))
     reaction = np.maximum(a, f)
     n = len(g)
-    sync = np.zeros(n, dtype=np.float32)
-    response_lag = np.zeros(n, dtype=int)
-    for lag in range(min(n, round(cfg["sync_s"] / hop) + 1)):
-        count = n - lag
-        joint = np.minimum(g[:count], reaction[lag : lag + count])
-        better = joint > sync[:count]
-        response_lag[:count][better] = lag
-        sync[:count] = np.maximum(sync[:count], joint)
+    cards = card_appearances(features.get("result_visible", np.zeros(n, bool)), hop, duration, cfg["hold_s"])
+    barriers = np.array(features.get("hard_cut", np.zeros(n, bool)), dtype=bool, copy=True)
+    for at in cards:
+        barriers[at] = False  # a verified result card may itself arrive on a cut
+    if cards:
+        # A known graphic often replaces the entire screen. Its onset is boundary evidence only.
+        g = g.copy()
+        g[list(cards)] = 0
+        features = dict(features, gameplay_activity=g)
+    scene_id = np.cumsum(barriers)
+    scene_edges = np.r_[0, np.flatnonzero(barriers), n]
+    sync, response_lag = _response_pairs(features, scene_id, hop, cfg)
+    laugh_ends = _laugh_endpoints(features, scene_id, hop, cfg)
     segments = (transcript or {}).get("segments", [])
     narrative = np.zeros(n, np.float32)
     for previous, reply in zip(segments, segments[1:]):
@@ -201,7 +270,9 @@ def propose(features, transcript, duration, hop, cfg, top_k):
             and _complete(reply["text"])
             and 0 <= reply["start"] - previous["end"] <= cfg["speech_pause_s"]
         ):
-            narrative[min(n - 1, int(reply["start"] / hop))] = 1
+            reply_i = min(n - 1, int(reply["start"] / hop))
+            if scene_id[min(n - 1, int(previous["start"] / hop))] == scene_id[reply_i]:
+                narrative[reply_i] = 1
     curves = dict(
         audio_reaction=a,
         facecam_activity=f,
@@ -227,7 +298,8 @@ def propose(features, transcript, duration, hop, cfg, top_k):
     cuts = np.flatnonzero(features["scene_change"] >= cfg["scene_change"]) * hop
     strength = np.maximum.reduce([g, reaction, narrative])
     active = np.flatnonzero(strength >= cfg["evidence_floor"])
-    groups = np.split(active, np.flatnonzero(np.diff(active) * hop > cfg["group_gap_s"]) + 1)
+    breaks = (np.diff(active) * hop > cfg["group_gap_s"]) | (np.diff(scene_id[active]) != 0)
+    groups = np.split(active, np.flatnonzero(breaks) + 1)
     candidates = []
     for group in groups:
         if not len(group):
@@ -241,15 +313,44 @@ def propose(features, transcript, duration, hop, cfg, top_k):
             peak = (idx * hop + min(duration, (idx + 1) * hop)) / 2
             first, last = float(part[0] * hop), min(duration, float((part[-1] + 1) * hop))
             response = idx + int(response_lag[idx])
+            scene = scene_id[idx]
+            lower, stop = int(scene_edges[scene]), int(scene_edges[scene+1])
+            responses = part[reaction[part] >= cfg["evidence_floor"]]
+            last_response = int(responses[-1]) if len(responses) else None
             if sync[idx] >= cfg["evidence_floor"]:
-                last = max(last, min(duration, (idx + int(response_lag[idx]) + 1) * hop))
-            start, end, risk = _timing(segments, first, last, peak, duration, cfg, cuts, g, hop)
+                last_response = max(response, last_response if last_response is not None else response)
+            reaction_end = None
+            if last_response is not None:
+                tail_stop = min(stop, max(last_response+1, int(first / hop + cfg["max_event_s"] / hop)))
+                tail = min(tail_stop - 1, max(last_response, int(laugh_ends[part].max()), int(laugh_ends[response])))
+                while tail + 1 < tail_stop and reaction[tail+1] >= cfg["reaction_release"]:
+                    tail += 1
+                reaction_end = min(duration, (tail + 1) * hop)
+                last = max(last, reaction_end)
+            status, payoff_at, visible_until = _payoff_observation(
+                cards, features.get("quiet_hold_until"), idx, last, stop, hop, cfg)
+            ceiling = min(duration, stop * hop)
+            if payoff_at is not None:
+                read_until = min(visible_until, payoff_at + cfg["read_s"])
+                if status == "matched result card" and visible_until <= read_until + cfg["settle_s"]:
+                    read_until = visible_until  # finish a short card at its observed disappearance
+                last = max(last, read_until)
+                # After the observed result and reaction, leave the next conversation to its own clip.
+                ceiling = min(ceiling, last + cfg["settle_s"])
+                if status == "matched result card":
+                    ceiling = min(ceiling, max(read_until, (reaction_end or 0) + cfg["settle_s"]))
+            start, end, risk, ceiling = _timing(segments, first, last, peak, duration, cfg, cuts, g, hop,
+                                                 lower * hop, ceiling)
+            if visible_until is not None and visible_until > end:
+                risk = True
             if part[-1] < group[-1]:
                 risk = True  # activity continued into another proposed event
             if not start <= peak < end or end - start < min(cfg["min_s"], duration) - 0.01:
                 continue
             scores = {key: round(float(curve[idx]), 4) for key, curve in curves.items()}
             scores["context_completeness"] = 0.0 if risk else 1.0
+            # Keep editorial uncertainty separate from the existing structural score.
+            review_ending = risk or status != "matched result card"
             contributions = {key: value * weights[key] for key, value in scores.items()}
             total = sum(contributions.values())
             evidence = {}
@@ -267,15 +368,12 @@ def propose(features, transcript, duration, hop, cfg, top_k):
             confidence = (
                 "moderate" if not risk and (sync[idx] >= cfg["evidence_floor"] or narrative[idx]) else "low"
             )
-            responses = part[reaction[part] >= cfg["evidence_floor"]]
-            reaction_end = min(duration, float(responses[-1] + 1) * hop) if len(responses) else None
-            if sync[idx] >= cfg["evidence_floor"]:
-                reaction_end = max(reaction_end or 0, min(duration, (response + 1) * hop))
             timing = dict(
                 setup_start=round(start, 3),
                 event_start=round(first, 3),
                 peak_time=round(peak, 3),
                 reaction_end=round(reaction_end, 3) if reaction_end is not None else None,
+                payoff_start=round(payoff_at, 3) if payoff_at is not None else None,
                 clip_end=round(end, 3),
             )
             flags = dict(
@@ -283,13 +381,18 @@ def propose(features, transcript, duration, hop, cfg, top_k):
                 moment_type=kind,
                 reason=reason,
                 confidence=confidence,
-                cut_risk=risk,
+                cut_risk=review_ending,
+                payoff_status=status,
+                camera_type=cfg["camera_type"],
+                end_ceiling=ceiling,
                 timing=timing,
                 contributions=contributions,
                 evidence=evidence,
                 hooks=_hooks(segments, start, end, peak),
                 boundary_cues=[round(float(t), 3) for t in cuts if start - 3 <= t <= end + 3],
             )
+            if payoff_at is not None:
+                evidence["payoff"] = {"cue": status, "first_seen": payoff_at, "observed_until": visible_until}
             candidates.append(
                 Candidate(
                     start, end, peak, round(total, 4), scores, flags, tr.text_between(transcript, start, end)

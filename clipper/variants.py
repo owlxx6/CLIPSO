@@ -58,7 +58,7 @@ def plan_variants(
     cfg: dict,
     used_cuts: dict[str, list[tuple[float, float]]] | None = None,
     *, transcript: dict | None = None, cues: list[float] | None = None,
-    duration_limits: tuple[float, float] | None = None, protected: bool = False,
+    duration_limits: tuple[float, float] | None = None, protected: bool = False, end_ceiling: float | None = None,
 ) -> list[Variant]:
     used_cuts = used_cuts or {}
     min_dist = float(cfg["variants"]["min_cut_distance_s"])
@@ -81,6 +81,8 @@ def plan_variants(
         radius = max(float(pcfg.get("trim_jitter_s", 1.2)), float(cfg["detection"]["snap_search_s"]))
         starts = _edge_options(start, end, peak, duration, min_s, max_s, radius, True, segments, words, cues)
         ends = _edge_options(end, start, peak, duration, min_s, max_s, radius, False, segments, words, cues)
+        if protected and end_ceiling is not None:
+            ends = [(t, cost) for t, cost in ends if t <= max(end, end_ceiling)]
         pre = min(peak - start, float(cfg["detection"]["pre_roll_s"]), max_s * 0.5)
         post = min(end - peak, float(cfg["detection"]["post_roll_s"]), max_s * 0.3)
         best = None

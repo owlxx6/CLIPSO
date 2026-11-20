@@ -56,6 +56,7 @@ def test_synchronized_event_beats_laughter_and_narration(cfg):
     assert [r.flags["moment_type"] for r in ranked] == ["event + reaction", "humour cue", "narrative"]
     pair = ranked[0].flags["evidence"]["synchronized_pair"]
     assert (pair["game_time"], pair["response_time"], pair["response_channel"]) == (20, 21.5, "tracked_face")
+    assert pair["window"] == "ordinary"
     assert ranked[0].flags["hooks"] == []
     assert round(sum(ranked[0].flags["contributions"].values()), 4) == ranked[0].score
     assert [c.as_dict() for c in ranked] == [c.as_dict() for c in proposals(cfg, f, segs)]
@@ -112,6 +113,7 @@ def test_malformed_transcript_is_not_quoted():
 
 
 def test_motion_in_facecam_is_excluded_from_gameplay(cfg, monkeypatch):
+    cfg["stream_highlights"]["camera_type"] = "webcam"
     frames = [np.zeros((96, 160), np.uint8) for _ in range(5)]
     rng = np.random.default_rng(42)
     for frame in frames:
@@ -162,6 +164,8 @@ def test_mode_review_preview_and_vertical_render(source, cfg):
     assert result["layout"] == "stacked" and Path(result["path"]).is_file()
     assert result["start"] <= review_start and result["end"] >= review_end and result["hook"] is None
     assert result["highlight"]["mode"] == hunter.MODE and result["validation"]["technically_valid"]
+    assert result["highlight"]["payoff_status"] == edited["flags"]["payoff_status"]
+    assert result["end"] <= max(review_end, edited["flags"]["end_ceiling"])
     assert cli.main(["eval", str(sid), "--mode", hunter.MODE]) == 0
     assert cli.main(["candidates", str(sid), "--mode", hunter.MODE]) == 0
 
@@ -201,7 +205,8 @@ def test_spoken_event_term_needs_visual_support(cfg):
     assert c.flags["hooks"] == [] and "spoken_chaos_cue" in c.flags["evidence"]
 
 
-def test_review_screen_saves_cuts_and_removes_hook(source, cfg):
+@pytest.mark.parametrize("with_payoff", [False, True])
+def test_review_screen_saves_cuts_and_removes_hook(source, cfg, with_payoff):
     streamlit = pytest.importorskip("streamlit.testing.v1")
     conn, sid = source
     row = dict(
@@ -222,10 +227,14 @@ def test_review_screen_saves_cuts_and_removes_hook(source, cfg):
             "cut_risk": True,
         },
     )
+    if with_payoff:
+        row["flags"].update(payoff_status="held visual change", camera_type="avatar")
     (cid,) = db.replace_candidates(conn, sid, [row], mode=hunter.MODE)
     app = streamlit.AppTest.from_file(str(Path(cli.__file__).with_name("review_app.py"))).run()
     app.sidebar.selectbox[1].select(hunter.MODE).run()
     assert not app.exception
+    if with_payoff:
+        assert any("Payoff evidence: held visual change" in c.value for c in app.caption)
     app.number_input(key=f"end_{cid}").set_value(29.0)
     app.text_input(key=f"hook_{cid}").set_value("")
     app.button(key=f"save_{cid}").click().run()

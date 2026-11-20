@@ -16,6 +16,8 @@ $rights = Read-Host "Permission reference and permitted use"
 & $py -m clipper ingest "$video" --rights "$rights"
 $id = [int](Read-Host "Source ID printed by ingest")
 & $py -m clipper analyze $id --mode classic --no-transcribe
+# For a recording with a confirmed real webcam:
+& $py -m clipper layout $id --camera-type webcam
 & $py -m clipper analyze $id --mode stream_highlights --no-transcribe
 & $py -m clipper candidates $id --mode stream_highlights --top 10
 & $py -m clipper review
@@ -23,7 +25,7 @@ $id = [int](Read-Host "Source ID printed by ingest")
 
 Keep each application's writable database with its own checkout when comparing V1 with an older release. For a source already registered in this checkout, use its existing ID. To inspect another checkout's data in isolation, copy the database using SQLite backup, the source sidecars and relevant configuration to a separate CLIPPER_HOME. For timed speech, use `ingest --transcript FILE`, or bind a verified transcript with `clipper import-transcript $id FILE`. With faster-whisper and a local model installed, omit `--no-transcribe` to generate words. The review app's Analyze button reuses available speech and works offline.
 
-Automatic facecam detection uses the bundled YuNet detector (or the existing OpenCV fallback). If necessary, inspect the frame and enter the actual normalized overlay rectangle for that recording.
+For a confirmed webcam, automatic facecam detection uses the bundled YuNet detector (or the existing OpenCV fallback). If necessary, inspect the frame and enter the actual normalized overlay rectangle for that recording.
 
 ```powershell
 & $py -m clipper layout $id --detect --preview .\layout-check.png
@@ -59,7 +61,51 @@ The detector searches around observed activity and protects complete spoken word
 
 The YAML keys and defaults are in [defaults.yaml](../clipper/defaults.yaml). Use `analysis.mode: stream_highlights` to make this ranking the local default. Adjust `stream_highlights.min_s`, `max_s`, `speech_pause_s`, `dialogue_bridge_s`, `sync_s` and `min_score` in a local or streamer config. Expensive stream measurements are cached using the recording digest, sampling parameters and camera ROI. Changing scoring weights reuses the measurements. The two rankings share time-based labels and retain their own candidates and edited hooks. V1 uses the existing SQLite schema. Classic `tune` continues to tune the classic detector.
 
-## Before and after on the 15-minute recording
+## Research follow-up and implementation status
+
+The observations motivated timing and review rules. The seven score weights have not been retuned. Set the camera type once per recording with `clipper layout ID --camera-type TYPE`, or set `stream_highlights.camera_type` in the streamer profile. A saved source choice wins over the profile. Reanalyze after changing the type. The camera type controls evidence collection independently of the export framing.
+
+| Camera type | Measurements used |
+|---|---|
+| `unknown` (default) | Audio and visual activity outside any known overlay. Confirm a real webcam before enabling face tracking. |
+| `gameplay_only` | Measure the entire game picture, including areas occupied by a stale camera box from an earlier layout. |
+| `webcam` | Track a face inside a configured or detected overlay and mask that overlay from gameplay activity. |
+| `full_body`, `avatar` | Mask the configured overlay, including a PNG or VTuber. Use audio and the remaining picture. Without an overlay box, use audio and transcript for proposals. |
+| `screen_reaction` | Use audio and transcript for proposals. Screen transitions can separate scenes. |
+
+| Behavior | Status and review interpretation |
+|---|---|
+| Delayed responses | Implemented. The ordinary forward window is `sync_s` (3 s). Out to `delayed_sync_s` (8 s), a response needs timed speech with an energy change, periodic mixed-audio evidence, a laughter marker, or movement of a confidently tracked face. A confirmed shot break or a more recent competing game event blocks that extended association. |
+| Sustained responses | Implemented. Follow weaker continuous measured activity after a supported reaction. Timed laughter words cover their stated duration. Repeated markers can span up to `repeat_laugh_gap_s` of silence within a scene. Intervening speech or renewed gameplay blocks the bridge. |
+| Quiet visual results | Experimental. A change outside the camera and result regions followed by a persistent new picture can extend an existing event through a quiet pause. Review shows the first change and how long it held. A changed image can be an unrelated camera movement. |
+| Known on-screen text | Optional, experimental. Match an editor-supplied result graphic in a fixed region with OpenCV. Require repeated actual samples over `hold_s`. An always-present HUD, an isolated flash or a matching card without an underlying event cannot seed a clip from that region. A matched result can arrive on a shot cut. |
+| Unrelated endings | Implemented. Persistent histogram changes bound the scene. The return from a single sampled flash is ignored. A pause after a completed utterance can separate the next conversation. The platform planner respects the detected end ceiling. If multiple distinct cuts cannot fit, render fewer platforms or explicitly review the bounds. |
+| Payoff and review | Implemented. Inspect the event, measured response, first payoff cue, its sampled interval and the proposed end. A quiet picture, missing cue, or display continuing beyond the reading allowance requests human review. Manually extending an end past an automatic ceiling authorizes the reviewed interval. |
+| Semantic interpretation | Deferred. Automatic OCR of arbitrary usernames, subtitles and changing HUD text, camera-type classification, smiles, laughter without timed or acoustic evidence, topic recognition and respawn identification require independent evidence. |
+
+### Configure an optional result message
+
+Crop a tightly framed, high-contrast message from an authorized recording and save it locally as a PNG. Set the matching source rectangle in normalized coordinates. For example, a crop at (480, 270) of size 960 × 135 on a 1920 × 1080 source uses the following profile. The template and screen region should have the same appearance and aspect ratio.
+
+```yaml
+stream_highlights:
+  result_card:
+    template: data/templates/mission-result.png
+    roi: [0.25, 0.25, 0.50, 0.125]
+    similarity: 0.90
+```
+
+Paths are relative to `CLIPPER_HOME` or absolute. The default configuration leaves the template disabled. The scan uses existing downscaled frames, masks this region from gameplay novelty and adds no OCR engine or model. Edits to the template, region, camera type or scan settings invalidate the cached visual measurements. In a transparent, animated or repositioned HUD the template can miss appearances. A match reports the operator's graphic only and never generates a hook from its contents.
+
+Visual times have sampling precision (default 2 fps). The reported interval for a result card ends at the first missed sample or the end of the recording. A held picture gets up to `read_s` (4 s) of automatic reading time. A short matched card can finish at its observed disappearance within one additional settling interval. If a corroborated response continues later in the same scene, the boundary also protects that response. A long card is flagged so the editor can extend the preview or cut earlier.
+
+### Evaluation plan
+
+Deterministic tests cover delayed responses with and without competing events, laughter across silence and interruptions, quiet held pictures, persistent text, transient or permanent HUD, camera profiles, an unrelated new conversation, a result cut followed by a new shot, and export ceilings with human overrides. On held-out authorized recordings, have editors mark event onset, reaction end and the earliest acceptable ending before viewing the rankings. Record missed payoffs, unrelated tail seconds, clipped reactions, the proportion of warnings requiring a change, and cold/warm CPU time by camera type. Use these labels before changing any weights or adding an OCR model.
+
+On one Windows workstation the previous and updated feature branches took respectively 5.37 and 5.36 seconds for the first visual scan of the same 15-minute recording, and 0.29 and 0.31 seconds with the visual cache. These single-run wall times include CLI startup and reuse the same ASR, loudness data and confirmed webcam region. The previous branch proposed 29 clips. The update proposed 33, with four held-image cues and 29 unconfirmed payoffs. No result template was supplied. The dialogue interval was again 06:34.81–07:39.03, now at rank 12, and still requests review. All four existing labels survived in the benchmark copy. These timings and proposals have not been scored for editorial improvement.
+
+## Initial V1 benchmark on the 15-minute recording
 
 The comparison used a private SQLite backup, the same source, its existing timed transcript, the four existing labels and the local streamer settings. The clip was marked for local testing only. No private media, transcript, database or generated export is included in this branch.
 

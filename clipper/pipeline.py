@@ -15,6 +15,7 @@ from clipper import campaign, config, db, dedup, detect, media, render, subtitle
 from clipper import layout as layout_mod
 from clipper import stream_highlights as hunter
 from clipper.signals import stream as activity
+from clipper.signals import payoff
 from clipper.signals import audio, chat, viewer_clips, visual
 from clipper.signals import transcript as tr
 
@@ -226,22 +227,36 @@ def _stream_transcript(cfg, source, transcribe, force, log, digest):
 
 
 def _stream_candidates(cfg, source, transcribe, force, log):
-    settings = cfg["stream_highlights"]
+    wd = workdir(cfg, source["id"])
+    saved_layout = layout_mod.load_layout(wd) or {}
+    settings = dict(cfg["stream_highlights"])
+    settings["camera_type"] = saved_layout.get("camera_type", settings["camera_type"])
     hop, duration = float(cfg["analysis"]["hop_s"]), source["duration"]
     if (hop <= 0 or settings["sample_fps"] <= 0 or settings["scan_width"] < 32
             or not 0 < settings["min_s"] <= settings["max_s"] or settings["max_event_s"] <= 0
             or not 0 < settings["pitch_min_hz"] < settings["pitch_max_hz"] or not 0 < settings["voicing_threshold"] <= 1
-            or any(settings[k] <= 0 for k in ("baseline_s", "energy_rise_db", "motion_rise", "scene_change",
+            or settings["camera_type"] not in activity.CAMERA_TYPES
+            or not 0 <= settings["sync_s"] or settings["delayed_sync_s"] < 0
+            or not 0 < settings["quiet_still_fraction"] < settings["quiet_change_fraction"] <= 1
+            or not 0 < settings["reaction_release"] <= settings["evidence_floor"] or not 0 < settings["hard_cut"] <= 1
+            or any(settings[k] <= 0 for k in ("hold_s", "read_s", "topic_pause_s", "repeat_laugh_gap_s",
+                                              "payoff_search_s", "baseline_s", "energy_rise_db", "motion_rise", "scene_change",
                                               "pitch_change_semitones"))):
         raise ValueError("invalid stream_highlights timing, sampling or activity settings")
     raw = raw_signals(cfg, source, force, log)
     digest = media.sha256_file(source["path"])
     data = _stream_transcript(cfg, source, transcribe, force, log, digest)
-    lay = ensure_layout(cfg, source, log=log)
-    wd = workdir(cfg, source["id"])
+    reference = payoff.result_reference(settings)
+    lay = (ensure_layout(cfg, source, log=log) if settings["camera_type"] == "webcam"
+           else layout_mod.resolve(cfg, wd))
     rate = int(cfg["analysis"]["audio"]["sample_rate"])
     pitch_settings = [settings[k] for k in ("pitch_min_hz", "pitch_max_hz", "pitch_change_semitones", "voicing_threshold")]
-    key = json.dumps([2, digest, rate, pitch_settings, hop, lay["facecam"], settings["sample_fps"], settings["scan_width"],
+    visual_settings = {k: settings[k] for k in ("camera_type", "quiet_still_fraction", "quiet_change_fraction",
+                                                "hold_s", "hard_cut", "result_card")}
+    reference_hash = hashlib.sha256(reference.tobytes()).hexdigest() if reference is not None else None
+    key = json.dumps([3, digest, rate, pitch_settings, visual_settings, reference_hash,
+                      list(reference.shape) if reference is not None else None,
+                      hop, lay["facecam"], settings["sample_fps"], settings["scan_width"],
                       settings["baseline_s"], settings["motion_rise"], settings["scene_change"]], sort_keys=True)
     cache = wd / "stream_activity.npz"
     features = None
@@ -251,7 +266,7 @@ def _stream_candidates(cfg, source, transcribe, force, log):
                 features = {k: saved[k] for k in saved.files if k != "_key"}
     if features is None:
         log("measuring gameplay and facecam activity ...")
-        features = activity.visual_features(source, lay["facecam"], duration, hop, settings)
+        features = activity.visual_features(source, lay["facecam"], duration, hop, settings, reference)
         features["pitch_change"] = activity.pitch_changes(source, hop, rate, settings)
         with tempfile.TemporaryDirectory(dir=wd) as folder:
             temp = Path(folder) / cache.name
@@ -295,9 +310,12 @@ def analyze(conn, cfg: dict, source_id: int, transcribe: bool = True, force: boo
 
 # --- layout ------------------------------------------------------------------------------------------------------
 
-def ensure_layout(cfg: dict, source: dict, force: bool = False, log=print) -> dict:
+def ensure_layout(cfg: dict, source: dict, force: bool = False, log=print, *, camera_type: str | None = None) -> dict:
     wd = workdir(cfg, source["id"])
-    if not force and (layout_mod.load_layout(wd) is not None or config.get(cfg, "streamer.facecam")):
+    previous = layout_mod.load_layout(wd) or {}
+    if not force and (previous.get("kind") or config.get(cfg, "streamer.facecam")):
+        if camera_type and camera_type != previous.get("camera_type"):
+            layout_mod.save_layout(wd, dict(previous, camera_type=camera_type))
         return layout_mod.resolve(cfg, wd)
     log("looking for the facecam ...")
     found = layout_mod.detect_facecam(source["path"], float(source["duration"]),
@@ -308,15 +326,20 @@ def ensure_layout(cfg: dict, source: dict, force: bool = False, log=print) -> di
     else:
         saved = {"kind": "blur_fit", "facecam": None, "auto": True}
         log("no stable facecam found: using the blurred-background layout")
+    if camera_type or previous.get("camera_type"):
+        saved["camera_type"] = camera_type or previous["camera_type"]
     layout_mod.save_layout(wd, saved)
     return layout_mod.resolve(cfg, wd)
 
 
-def set_layout(cfg: dict, source: dict, kind: str | None = None, box: dict | None = None) -> dict:
+def set_layout(cfg: dict, source: dict, kind: str | None = None, box: dict | None = None,
+               *, camera_type: str | None = None) -> dict:
     wd = workdir(cfg, source["id"])
     current = layout_mod.load_layout(wd) or {}
     facecam = box if box is not None else current.get("facecam")
     saved = {"kind": kind or ("stacked" if facecam else "blur_fit"), "facecam": facecam, "auto": False}
+    if camera_type or current.get("camera_type"):
+        saved["camera_type"] = camera_type or current["camera_type"]
     layout_mod.save_layout(wd, saved)
     return layout_mod.resolve(cfg, wd)
 
@@ -441,6 +464,7 @@ def render_candidates(conn, cfg: dict, source_id: int, candidate_ids: list[int],
                                        platforms, cfg, used, transcript=transcript,
                                        cues=(cand.get("flags") or {}).get("boundary_cues", []),
                                        duration_limits=campaign.duration_limits(policy),
+                                       end_ceiling=(cand.get("flags") or {}).get("end_ceiling"),
                                        protected=(cand.get("flags") or {}).get("mode") == hunter.MODE)
         hook_text = hook or cand.get("hook") or None
         out_dir = export_dir(cfg, source_id, cid)

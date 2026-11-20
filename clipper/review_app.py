@@ -66,6 +66,8 @@ for c in cands[:top_n]:
             if mode == stream_highlights.MODE:
                 st.write(f"{flags['moment_type']} · {flags['confidence']} confidence")
                 st.write(flags["reason"])
+                if "payoff_status" in flags:
+                    st.caption(f"Payoff evidence: {flags['payoff_status']} · camera type: {flags['camera_type']}")
                 st.caption(" · ".join(f"{name.replace('_', ' ')} {media.fmt_ts(t) if t is not None else 'unobserved'}" for name,t in flags["timing"].items()))
                 with st.expander("Score and timed evidence"):
                     st.json({"measurements": c["signals"], "weighted_score": flags.get("contributions", {}),

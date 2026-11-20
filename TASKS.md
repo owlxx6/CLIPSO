@@ -4,6 +4,8 @@ Shared log for the humans and agents working on this repo (see AGENTS.md). One t
 
 ## Stream Highlights V1
 
+- In review (Codex), research follow-up on the existing feature PR. Shot-aware delayed responses, marked laughter across silence, explicit camera types and export end ceilings are implemented. Held-image and opt-in result-card timing are experimental. The [evaluation plan](docs/STREAM_HIGHLIGHTS.md#evaluation-plan) covers missed payoffs and unwanted endings. General OCR, smile and topic recognition, and weight calibration await held-out human labels.
+
 - In review (Codex), branch `feat/stream-highlights-v1`, based on the verified November hardening branch. Optional CPU detector, separate rankings, preserved human edits, event-aware cuts, evidence and vertical review are implemented.
 - Human evaluation remains open. On the local 15-minute comparison both modes retrieved the two previously marked positive windows in their top ten. The new ranking moved them lower. Review the extended dialogue candidate and collect independent event, reaction and endpoint labels on held-out footage. [Benchmark and limitations](docs/STREAM_HIGHLIGHTS.md)
 

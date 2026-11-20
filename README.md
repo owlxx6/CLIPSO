@@ -254,6 +254,8 @@ In `clipper review` choose **Stream Highlights**, inspect the time-stamped evide
 
 The [Stream Highlights guide and benchmark](docs/STREAM_HIGHLIGHTS.md) contains the PowerShell walkthrough, supported configuration, comparison on a 15-minute recording, sources and limitations.
 
+For a recording with a real webcam, run `clipper layout SOURCE --camera-type webcam` before analysis. Other choices include gameplay only, a full-body camera, screen reactions and avatars. Review now shows delayed and sustained reaction evidence, held-image or known result-card timing, and uncertain endings. A local image of a result message can serve as an optional template.
+
 ## Duplicate guard
 
 Before rendering, for each platform:

@@ -75,7 +75,22 @@ stream_highlights:
   voicing_threshold: 0.65     # autocorrelation minimum for adjacent periodic audio windows
   motion_rise: 0.30           # excess fraction of changed gameplay pixels
   scene_change: 0.48          # grayscale histogram distance
-  sync_s: 3                   # reaction may follow the visual event
+  camera_type: unknown        # unknown | gameplay_only | webcam | full_body | screen_reaction | avatar
+  sync_s: 3                   # ordinary response window, within the same shot
+  delayed_sync_s: 8           # longer window for corroborated responses without a competing event
+  repeat_laugh_gap_s: 6       # maximum pause between marked laughs in the same scene
+  reaction_release: 0.32      # retain continuous weaker activity after a supported reaction
+  hard_cut: 0.72              # persistent histogram break, checked against adjacent samples
+  payoff_search_s: 7          # look for a visible result after an existing event
+  quiet_change_fraction: 0.08 # fraction of sampled gameplay pixels changed at a possible result
+  quiet_still_fraction: 0.025 # maximum fraction changed while the new image holds
+  hold_s: 1.5                 # minimum observed persistence for a visual cue
+  read_s: 4                   # reading allowance; a matched card can finish within one extra settle interval
+  topic_pause_s: 1.2          # after a completed utterance, avoid absorbing a new one across this gap
+  result_card:
+    template: null            # optional local image cropped to a known result message
+    roi: null                 # normalized [x, y, width, height] matching that crop
+    similarity: 0.90          # normalized template correlation in the configured region
   group_gap_s: 2.5
   max_event_s: 24
   setup_margin_s: 2.5

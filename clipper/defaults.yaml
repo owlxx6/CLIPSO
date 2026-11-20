@@ -102,6 +102,15 @@ stream_highlights:
   max_s: 90
   chaos_terms: [explosion, collision, carambolage, crash, accident, poursuite]  # quotes used as cues only
   evidence_floor: 0.55
+  opening:
+    window_s: 3               # first 1 to 3 seconds of the actual cut
+    late_discount: 0.30       # maximum discount for a cue at the far end of the opening
+    visible_s: 1.0            # minimum overlap to credit a held image or known result graphic
+    search_s: 4               # maximum idle lead-in to trim within the same scene
+    context_lead_s: 0.75      # preserve an establishing beat before measured activity
+    silence_db: -50           # only verified quiet, visually stable padding can be trimmed
+    strong_min: 0.55          # weaker openings request review
+    bonus_weight: 0.18        # provisional rank points at full strength, capped at 10% of quality
   min_score: 1.1
   weights: {audio_reaction: 1.6, facecam_activity: 0.8, gameplay_activity: 0.8, event_reaction_sync: 3.2,
             narrative_coherence: 1.15, novelty: 0.55, context_completeness: 0.3}

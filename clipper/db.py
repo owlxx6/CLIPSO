@@ -6,7 +6,7 @@ import json
 import sqlite3
 from typing import Any, Iterable
 
-from clipper import config
+from clipper import config, opening
 from clipper.signals import transcript as tr
 
 SCHEMA = """
@@ -220,6 +220,7 @@ def replace_candidates(conn: sqlite3.Connection, source_id: int, candidates: lis
         conn.execute("BEGIN IMMEDIATE")
         previous = _rows(conn.execute("SELECT * FROM candidates WHERE source_id=? ORDER BY id", (source_id,)))
         previous = [r for r in previous if (r.get("flags") or {}).get("mode", "classic") == mode]
+        reviewed_score_changed = False
         conn.executemany("UPDATE candidates SET rank=NULL WHERE id=?", [(r["id"],) for r in previous])
         for rank, cand in enumerate(candidates, start=1):
             matches = [row for row in previous
@@ -234,7 +235,12 @@ def replace_candidates(conn: sqlite3.Connection, source_id: int, candidates: lis
                 row = min(matches, key=lambda item: abs(item["peak_s"] - cand["peak"]))
                 if "review_bounds" in (row.get("flags") or {}):
                     flags["review_bounds"] = row["flags"]["review_bounds"]
-            values = (rank, cand["start"], cand["end"], cand["peak"], cand["score"],
+            score = cand["score"]
+            if "opening_context" in flags and "review_bounds" in flags:
+                flags = opening.scored_flags(flags, *flags["review_bounds"])
+                score = round(sum(flags["contributions"].values()), 4)
+                reviewed_score_changed |= score != cand["score"]
+            values = (rank, cand["start"], cand["end"], cand["peak"], score,
                       json.dumps(cand.get("signals", {})), json.dumps(flags), cand.get("text", ""))
             if matches:
                 previous.remove(row)
@@ -250,6 +256,8 @@ def replace_candidates(conn: sqlite3.Connection, source_id: int, candidates: lis
         conn.executemany("DELETE FROM candidates WHERE id=? AND rank IS NULL AND hook_edited=0 AND "
                          "NOT EXISTS (SELECT 1 FROM exports WHERE candidate_id=candidates.id)",
                          [(r["id"],) for r in previous if "review_bounds" not in (r.get("flags") or {})])
+        if reviewed_score_changed:
+            _rank_stream_candidates(conn, source_id)
     return ids
 
 
@@ -257,6 +265,13 @@ def list_candidates(conn: sqlite3.Connection, source_id: int, mode: str = "class
     rows = _rows(conn.execute("SELECT * FROM candidates WHERE source_id=? AND rank IS NOT NULL ORDER BY rank",
                               (source_id,)))
     return [r for r in rows if (r.get("flags") or {}).get("mode", "classic") == mode]
+
+
+def _rank_stream_candidates(conn, source_id):
+    rows = sorted(list_candidates(conn, source_id, "stream_highlights"),
+                  key=lambda r: (-r["score"], r["peak_s"], r["id"]))
+    conn.executemany("UPDATE candidates SET rank=? WHERE id=?",
+                     [(rank, row["id"]) for rank, row in enumerate(rows, 1) if row["rank"] != rank])
 
 
 def save_stream_review(conn, candidate_id: int, start: float, end: float, hook: str) -> None:
@@ -268,8 +283,14 @@ def save_stream_review(conn, candidate_id: int, start: float, end: float, hook: 
         if flags.get("mode") != "stream_highlights" or not 0 <= start <= row["peak_s"] < end <= duration:
             raise ValueError("Review bounds must contain the peak and lie inside the recording")
         flags["review_bounds"] = [start, end]
-        conn.execute("UPDATE candidates SET flags=?,hook=?,hook_edited=1 WHERE id=?",
-                     (json.dumps(flags), hook.strip() or None, candidate_id))
+        score = row["score"]
+        if "opening_context" in flags:
+            flags = opening.scored_flags(flags, start, end)
+            score = round(sum(flags["contributions"].values()), 4)
+        conn.execute("UPDATE candidates SET score=?,flags=?,hook=?,hook_edited=1 WHERE id=?",
+                     (score, json.dumps(flags), hook.strip() or None, candidate_id))
+        if score != row["score"] and row["rank"] is not None:
+            _rank_stream_candidates(conn, row["source_id"])
 
 
 def get_candidate(conn: sqlite3.Connection, candidate_id: int) -> dict:

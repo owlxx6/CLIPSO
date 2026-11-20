@@ -193,6 +193,7 @@ def visual_features(source: dict, facecam: dict | None, duration: float, hop: fl
             raise ValueError("result_card ROI has too little detail at scan_width")
         mask[card_roi] = False  # a HUD or result update alone cannot seed a proposal
     raw, scene, face, confidence = (np.zeros(n, np.float32) for _ in range(4))
+    changed_fraction = np.full(n, np.nan, np.float32)  # unsampled time cannot certify idle lead-in
     visible = np.zeros(n, dtype=bool)
     hold = payoff.PictureHold(cfg, n)
     histograms, indices = [], []
@@ -210,8 +211,10 @@ def visual_features(source: dict, facecam: dict | None, duration: float, hop: fl
         if pixels.size and measure_game:
             hold.observe(i, pixels, prev_pixels, hop, t)
         if prev_frame is not None and pixels.size:
-            delta = cv2.absdiff(frame, prev_frame)[::4, ::4][mask[::4, ::4]]
+            frame_delta = cv2.absdiff(frame, prev_frame)[::4, ::4]
+            delta = frame_delta[mask[::4, ::4]]
             raw[i] = np.mean(delta > 20)
+            changed_fraction[i] = np.mean(frame_delta > 20)  # protect changes inside overlays as well
             scene[i] = np.abs(hist - prev_hist).sum() / 2
         if finder:
             box, quality = _track_face(frame[roi], finder, prev_box)
@@ -237,6 +240,7 @@ def visual_features(source: dict, facecam: dict | None, duration: float, hop: fl
     return dict(
         gameplay_activity=game if measure_game else np.zeros_like(game),
         scene_change=scene,
+        changed_fraction=changed_fraction,
         hard_cut=payoff.hard_cuts(histograms, indices, cfg["hard_cut"], n),
         quiet_hold_until=hold.until,
         result_visible=payoff.confirmed_card_samples(visible, indices, hop, cfg["hold_s"]),

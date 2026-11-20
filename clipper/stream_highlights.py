@@ -8,6 +8,7 @@ import re
 import numpy as np
 
 from clipper.detect import Candidate
+from clipper import opening
 from clipper.signals.payoff import card_appearances
 from clipper.signals import transcript as tr
 
@@ -30,6 +31,12 @@ _QUESTION = re.compile(
 _IMPERATIVE = re.compile(r"^(?:regardez?|écoutez?|attendez|watch|look|listen)\b", re.I)
 
 
+def _quotable(text):
+    return (3 <= len(text.split()) <= 14 and _complete(text) and text[0].isupper()
+            and not re.search(r"[.!?…]", text[:-1]) and len(set(text.casefold().split())) >= 3
+            and (_IMPERATIVE.match(text) or (text.endswith("?") and _QUESTION.match(text))))
+
+
 def _hooks(segments, start, end, peak):
     """Quote one intact utterance near the evidence peak or leave the hook empty."""
     suggestions = []
@@ -37,11 +44,7 @@ def _hooks(segments, start, end, peak):
         text = " ".join(seg["text"].split())
         if not (start <= seg["start"] < seg["end"] <= end and seg["start"]-6 <= peak <= seg["end"]+6):
             continue
-        if not 3 <= len(text.split()) <= 14 or not _complete(text) or not text[0].isupper():
-            continue
-        if re.search(r"[.!?…]", text[:-1]) or len(set(text.casefold().split())) < 3:
-            continue
-        if not (_IMPERATIVE.match(text) or (text.endswith("?") and _QUESTION.match(text))):
+        if not _quotable(text):
             continue
         quote = f"« {text} »"
         if quote not in suggestions:
@@ -247,6 +250,7 @@ def _interpret(features, idx, part, response_idx, sync_strength, narrative, hop,
 def propose(features, transcript, duration, hop, cfg, top_k):
     """Prefer game changes followed by reaction evidence. Scores are heuristic, not calibrated probabilities."""
     a, f, g = (features[k] for k in ("audio_reaction", "facecam_activity", "gameplay_activity"))
+    opening.validate(cfg["opening"])
     reaction = np.maximum(a, f)
     n = len(g)
     cards = card_appearances(features.get("result_visible", np.zeros(n, bool)), hop, duration, cfg["hold_s"])
@@ -264,6 +268,7 @@ def propose(features, transcript, duration, hop, cfg, top_k):
     laugh_ends = _laugh_endpoints(features, scene_id, hop, cfg)
     segments = (transcript or {}).get("segments", [])
     narrative = np.zeros(n, np.float32)
+    replies = {}
     for previous, reply in zip(segments, segments[1:]):
         if (
             previous["text"].strip().endswith("?")
@@ -273,6 +278,20 @@ def propose(features, transcript, duration, hop, cfg, top_k):
             reply_i = min(n - 1, int(reply["start"] / hop))
             if scene_id[min(n - 1, int(previous["start"] / hop))] == scene_id[reply_i]:
                 narrative[reply_i] = 1
+                if opening.specific_line(reply["text"]) and not reply["text"].rstrip().endswith("?"):
+                    replies[previous["start"]] = (reply["start"], reply["end"], "completed response to question")
+    lines = []
+    for i, seg in enumerate(segments):
+        if i and seg["start"] - segments[i-1]["end"] <= cfg["speech_pause_s"] and not _complete(segments[i-1]["text"]):
+            continue
+        if _quotable(seg["text"].strip()) and opening.specific_line(seg["text"]):
+            lines.append((seg, replies.get(seg["start"])))
+    opening_curves, idle = opening.measurements(features, hop, cfg, sync, response_lag)
+    pictures = {i: [("matched result graphic", until)] for i, until in cards.items()}
+    held = features.get("quiet_hold_until")
+    if held is not None:
+        for i in np.flatnonzero(held):
+            pictures.setdefault(int(i), []).append(("held gameplay image", held[i]))
     curves = dict(
         audio_reaction=a,
         facecam_activity=f,
@@ -353,6 +372,17 @@ def propose(features, transcript, duration, hop, cfg, top_k):
             review_ending = risk or status != "matched result card"
             contributions = {key: value * weights[key] for key, value in scores.items()}
             total = sum(contributions.values())
+            outcomes = []
+            if payoff_at is not None:
+                outcomes.append((payoff_at, visible_until, status))
+            if opening_curves["visual activity"][idx] >= cfg["evidence_floor"]:
+                outcomes.append((idx * hop, min(duration, (idx + 1) * hop), "measured gameplay change"))
+            if reaction_end is not None and opening_curves["corroborated reaction"][response] >= cfg["evidence_floor"]:
+                outcomes.append((response * hop, reaction_end, "corroborated reaction"))
+            context = opening.build_context(
+                opening_curves, idle, segments, lines, pictures, start=start, end=end, first=first, peak=peak,
+                scene_start=lower * hop, hop=hop, cfg=cfg, outcomes=outcomes, incomplete=risk)
+            start = opening.select_start(context, end, hop)
             evidence = {}
             for key, curve in {
                 **curves,
@@ -387,15 +417,19 @@ def propose(features, transcript, duration, hop, cfg, top_k):
                 end_ceiling=ceiling,
                 timing=timing,
                 contributions=contributions,
+                highlight_quality=round(total, 4),
+                opening_context=context,
                 evidence=evidence,
                 hooks=_hooks(segments, start, end, peak),
                 boundary_cues=[round(float(t), 3) for t in cuts if start - 3 <= t <= end + 3],
             )
             if payoff_at is not None:
                 evidence["payoff"] = {"cue": status, "first_seen": payoff_at, "observed_until": visible_until}
+            flags = opening.scored_flags(flags, start, end)
             candidates.append(
                 Candidate(
-                    start, end, peak, round(total, 4), scores, flags, tr.text_between(transcript, start, end)
+                    start, end, peak, round(total + flags["opening_bonus"], 4), scores, flags,
+                    tr.text_between(transcript, start, end)
                 )
             )
     kept = []

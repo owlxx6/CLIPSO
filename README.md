@@ -256,6 +256,8 @@ The [Stream Highlights guide and benchmark](docs/STREAM_HIGHLIGHTS.md) contains 
 
 For a recording with a real webcam, run `clipper layout SOURCE --camera-type webcam` before analysis. Other choices include gameplay only, a full-body camera, screen reactions and avatars. Review now shows delayed and sustained reaction evidence, held-image or known result-card timing, and uncertain endings. A local image of a result message can serve as an optional template.
 
+The review shows **Highlight quality**, **Opening strength** and the **Ranking bonus** separately. Open **First-seconds evidence** to see what happened in the first seconds of the current cut. Moving a boundary recalculates the preview score. Saving the edit updates the source ranking. Reanalyze older candidates to add these measurements. [Opening rules and settings](docs/STREAM_HIGHLIGHTS.md#first-seconds-opening-strength)
+
 ## Duplicate guard
 
 Before rendering, for each platform:

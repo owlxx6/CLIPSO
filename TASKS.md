@@ -4,6 +4,8 @@ Shared log for the humans and agents working on this repo (see AGENTS.md). One t
 
 ## Stream Highlights V1
 
+- In review (Codex), first-seconds opening scoring on PR #2. The existing quality gate runs first. Opening strength, timed evidence and its capped rank bonus follow the proposed, edited and exported cut. The [opening evaluation plan](docs/STREAM_HIGHLIGHTS.md#first-seconds-opening-strength) tracks opening preference separately from context loss.
+
 - In review (Codex), research follow-up on the existing feature PR. Shot-aware delayed responses, marked laughter across silence, explicit camera types and export end ceilings are implemented. Held-image and opt-in result-card timing are experimental. The [evaluation plan](docs/STREAM_HIGHLIGHTS.md#evaluation-plan) covers missed payoffs and unwanted endings. General OCR, smile and topic recognition, and weight calibration await held-out human labels.
 
 - In review (Codex), branch `feat/stream-highlights-v1`, based on the verified November hardening branch. Optional CPU detector, separate rankings, preserved human edits, event-aware cuts, evidence and vertical review are implemented.

@@ -61,6 +61,27 @@ The detector searches around observed activity and protects complete spoken word
 
 The YAML keys and defaults are in [defaults.yaml](../clipper/defaults.yaml). Use `analysis.mode: stream_highlights` to make this ranking the local default. Adjust `stream_highlights.min_s`, `max_s`, `speech_pause_s`, `dialogue_bridge_s`, `sync_s` and `min_score` in a local or streamer config. Expensive stream measurements are cached using the recording digest, sampling parameters and camera ROI. Changing scoring weights reuses the measurements. The two rankings share time-based labels and retain their own candidates and edited hooks. V1 uses the existing SQLite schema. Classic `tune` continues to tune the classic detector.
 
+## First-seconds opening strength
+
+Stream Highlights first admits a candidate using its existing event signals. Its seven weighted components give `highlight_quality`. The ranking can then receive a modest positive bonus from a separate `hook_strength_score` between 0 and 1. The scorer sees the first three seconds of the proposed cut by default. It records source times and offsets from the actual clip start. Generated hooks, edited captions and raw loudness contribute zero.
+
+| Opening cue | Evidence required |
+|---|---|
+| Visual action | A measured change in the gameplay region accompanied by local visual novelty. A hard cut alone earns zero. Gameplay-only footage can reach full opening strength. |
+| Reaction | A timed laughter marker supported by the audio response, concurrent tracked-face and audio activity, or a supported facial or periodic-audio response paired with a game event. These observations cannot establish an emotion or speaker identity. |
+| Quiet image or result graphic | A sustained new image or a matched local result template visible for at least one second of the opening. The cue describes a source image. Check legibility in the chosen vertical crop. |
+| Spoken line or anticipation | A complete, specific French or English question or imperative fits inside the opening. It coincides with measured action, or a later completed response, measured event or visible result falls within the kept clip. The evidence includes the spoken text and the supporting time when applicable. |
+
+Cue strength decreases with its delay inside the window. Only the strongest supported cue determines the score, so several correlated channels cannot inflate it. By default a score below 0.55 sets `weak_opening` and earns zero bonus. Otherwise the bonus is at most `0.18 × hook_strength_score`, limited to 10% of highlight quality. A structurally incomplete candidate or an edit that drops the protected ending gets zero bonus. The payoff-review warning remains independently visible when the meaning of the ending is uncertain.
+
+The start search retains the original event, reaction and end. It compares alternatives within the same scene, trimming only measured quiet, visually stable lead-in before the first protected cue. Speech, audible or unmeasured intervals, known graphics and visually active setup constrain the search. It preserves an establishing beat and the minimum duration. Equal scores retain more context. If the original cut straddles a timed utterance, its start can be restored when the full sentence fits. These are conservative timing heuristics. The editor still decides whether the opening tells the story faithfully.
+
+All provisional controls live under `stream_highlights.opening` in the YAML defaults. Set `window_s` from 1 to 3, `search_s` for the maximum automatic trim, `context_lead_s` for the lead before an event, and `silence_db` for verified quiet. `visible_s` sets the image dwell requirement, `late_discount` controls the effect of delay and `strong_min` sets the review threshold. Set `bonus_weight: 0` to compare quality-only rankings while keeping opening measurements.
+
+In Streamlit the score follows the start and end inputs before saving. Saving recalculates the active source ranking. Each platform export records its own opening score and evidence in the JSON receipt because platform starts can differ. A candidate analyzed before this feature acquires an opening score on its next analysis. The visual activity cache is rebuilt once to capture full-frame changes used to protect setup.
+
+For human evaluation, compare opening preference on two edits of the same event, then check whether the preferred start lost any setup or changed the meaning of the payoff. Measure these separately from overall clip quality before calibrating the bonus.
+
 ## Research follow-up and implementation status
 
 The observations motivated timing and review rules. The seven score weights have not been retuned. Set the camera type once per recording with `clipper layout ID --camera-type TYPE`, or set `stream_highlights.camera_type` in the streamer profile. A saved source choice wins over the profile. Reanalyze after changing the type. The camera type controls evidence collection independently of the export framing.

@@ -165,6 +165,11 @@ def test_mode_review_preview_and_vertical_render(source, cfg):
     assert result["start"] <= review_start and result["end"] >= review_end and result["hook"] is None
     assert result["highlight"]["mode"] == hunter.MODE and result["validation"]["technically_valid"]
     assert result["highlight"]["payoff_status"] == edited["flags"]["payoff_status"]
+    exported = result["highlight"]
+    assert exported["opening_window"] == [result["start"], min(result["end"], result["start"] + 3)]
+    assert exported["highlight_quality"] == edited["flags"]["highlight_quality"]
+    assert all(0 <= cue["clip_offset"] < 3 for cue in exported["opening_evidence"])
+    assert "opening_context" not in exported
     assert result["end"] <= max(review_end, edited["flags"]["end_ceiling"])
     assert cli.main(["eval", str(sid), "--mode", hunter.MODE]) == 0
     assert cli.main(["candidates", str(sid), "--mode", hunter.MODE]) == 0

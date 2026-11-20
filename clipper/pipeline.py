@@ -11,7 +11,7 @@ from pathlib import Path
 
 import numpy as np
 
-from clipper import campaign, config, db, dedup, detect, media, render, subtitles, variants
+from clipper import campaign, config, db, dedup, detect, media, opening, render, subtitles, variants
 from clipper import layout as layout_mod
 from clipper import stream_highlights as hunter
 from clipper.signals import stream as activity
@@ -231,6 +231,7 @@ def _stream_candidates(cfg, source, transcribe, force, log):
     saved_layout = layout_mod.load_layout(wd) or {}
     settings = dict(cfg["stream_highlights"])
     settings["camera_type"] = saved_layout.get("camera_type", settings["camera_type"])
+    opening.validate(settings["opening"])
     hop, duration = float(cfg["analysis"]["hop_s"]), source["duration"]
     if (hop <= 0 or settings["sample_fps"] <= 0 or settings["scan_width"] < 32
             or not 0 < settings["min_s"] <= settings["max_s"] or settings["max_event_s"] <= 0
@@ -254,7 +255,7 @@ def _stream_candidates(cfg, source, transcribe, force, log):
     visual_settings = {k: settings[k] for k in ("camera_type", "quiet_still_fraction", "quiet_change_fraction",
                                                 "hold_s", "hard_cut", "result_card")}
     reference_hash = hashlib.sha256(reference.tobytes()).hexdigest() if reference is not None else None
-    key = json.dumps([3, digest, rate, pitch_settings, visual_settings, reference_hash,
+    key = json.dumps([4, digest, rate, pitch_settings, visual_settings, reference_hash,
                       list(reference.shape) if reference is not None else None,
                       hop, lay["facecam"], settings["sample_fps"], settings["scan_width"],
                       settings["baseline_s"], settings["motion_rise"], settings["scene_change"]], sort_keys=True)
@@ -274,6 +275,7 @@ def _stream_candidates(cfg, source, transcribe, force, log):
             temp.replace(cache)
     features.update(activity.audio_features(raw["_db"], data, duration, hop, settings, cfg["signals"]["keywords"],
                                            features["pitch_change"]))
+    features["audio_db"] = raw["_db"]
     cands, score = hunter.propose(features, data, duration, hop, settings, cfg["detection"]["top_k"])
     for cand in cands:
         cine = raw["_cinematic"][int(cand.start/hop):int(np.ceil(cand.end/hop))]
@@ -465,6 +467,7 @@ def render_candidates(conn, cfg: dict, source_id: int, candidate_ids: list[int],
                                        cues=(cand.get("flags") or {}).get("boundary_cues", []),
                                        duration_limits=campaign.duration_limits(policy),
                                        end_ceiling=(cand.get("flags") or {}).get("end_ceiling"),
+                                       scene_start=(cand.get("flags") or {}).get("opening_context", {}).get("scene_start"),
                                        protected=(cand.get("flags") or {}).get("mode") == hunter.MODE)
         hook_text = hook or cand.get("hook") or None
         out_dir = export_dir(cfg, source_id, cid)
@@ -523,7 +526,11 @@ def render_candidates(conn, cfg: dict, source_id: int, candidate_ids: list[int],
                 if _source_key(source) != before:
                     raise RuntimeError("Recording changed during render; reanalyze the source")
                 if (cand.get("flags") or {}).get("mode") == hunter.MODE:
-                    meta["highlight"] = dict(cand["flags"], scores=cand["signals"])
+                    flags = cand["flags"]
+                    if "opening_context" in flags:
+                        flags = opening.scored_flags(flags, v.start, v.end)
+                        flags.pop("opening_context")  # receipt keeps only evidence for this exported window
+                    meta["highlight"] = dict(flags, scores=cand["signals"])
                 meta.update(source_sha256=source_digest, artifact_sha256=media.sha256_file(out),
                             duration_s=measured["duration"])
                 meta["validation"] = campaign.check(meta, policy, technical=True)

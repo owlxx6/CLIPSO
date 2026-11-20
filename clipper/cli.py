@@ -40,8 +40,9 @@ def _print_candidates(rows: list[dict], labels: list[dict], top: int) -> None:
         lab_txt = {1: "good", 0: "bad"}.get(lab, "")
         flag = " [check spoiler]" if (r.get("flags") or {}).get("spoiler_review") else ""
         hook = (r.get("hook") or "")[:40]
-        print(f"{r['id']:>5} {r['rank']:>4}  {media.fmt_ts(r['start_s']):>10}  {media.fmt_ts(r['end_s']):>10} "
-              f"{r['end_s'] - r['start_s']:>5.1f} {r['score']:>6.2f}  {lab_txt:>5}  {sig_txt}{flag}  {hook}")
+        start, end = (r.get("flags") or {}).get("review_bounds", (r["start_s"], r["end_s"]))
+        print(f"{r['id']:>5} {r['rank']:>4}  {media.fmt_ts(start):>10}  {media.fmt_ts(end):>10} "
+              f"{end - start:>5.1f} {r['score']:>6.2f}  {lab_txt:>5}  {sig_txt}{flag}  {hook}")
 
 
 # --- commands ----------------------------------------------------------------------------------------------------

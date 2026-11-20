@@ -26,12 +26,18 @@ def fingerprint(data: dict) -> str:
 
 
 def duration_limits(policy: dict) -> tuple[float, float] | None:
-    span = policy.get("duration_s")
-    if (policy.get("terms_verified") is True and isinstance(span, list) and len(span) == 2
-            and all(type(v) in (float, int) and math.isfinite(v) for v in span) and 0 <= span[0] <= span[1]
-            and span[1] > 0):
-        return tuple(span)
-    return None
+    if policy.get("terms_verified") is not True or "duration_s" not in policy:
+        return None
+    span = policy["duration_s"]
+    if span is None:
+        return 0.0, math.inf
+    if not isinstance(span, list) or len(span) != 2:
+        return None
+    if any(v is not None and (type(v) not in (int, float) or not math.isfinite(v)) for v in span):
+        return None
+    minimum = 0.0 if span[0] is None else span[0]
+    maximum = math.inf if span[1] is None else span[1]
+    return (minimum, maximum) if 0 <= minimum <= maximum and maximum > 0 else None
 
 
 def _text(value) -> bool:
@@ -65,7 +71,8 @@ def check(meta: dict, policy: dict, *, technical: bool, evidence: dict | None = 
         blocks.append("platform not authorized")
     limits = duration_limits(policy)
     duration = meta.get("duration_s")
-    if not limits or type(duration) not in (int, float) or not limits[0] <= duration <= limits[1]:
+    if (not limits or type(duration) not in (int, float) or not math.isfinite(duration) or duration <= 0
+            or not limits[0] <= duration <= limits[1]):
         blocks.append("duration unverified or outside range")
     caption = meta.get("caption") if isinstance(meta.get("caption"), str) else ""
     for field, prefix in (("hashtags", "#"), ("mentions", "@")):

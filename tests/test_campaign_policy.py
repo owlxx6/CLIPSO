@@ -45,6 +45,12 @@ def test_unmet_terms_block_readiness(meta, policy, field, value):
     assert not campaign.check(meta, policy, technical=True, now=NOW)["ready_for_submission"]
 
 
+@pytest.mark.parametrize("span", [None, [15, None], [None, 34]])
+def test_verified_absence_of_a_duration_limit_is_supported(meta, policy, span):
+    policy["duration_s"] = span
+    assert campaign.check(meta, policy, technical=True)["ready_for_submission"]
+
+
 def test_seven_independent_states_and_bound_evidence(meta, policy):
     policy.update(manual_review=True, overlays=["corner logo"], ai_restrictions=["no generated speech"])
     initial = campaign.check(meta, policy, technical=True)

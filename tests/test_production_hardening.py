@@ -61,6 +61,18 @@ def test_streaming_reports_invalid_and_truncated_media(tmp_path, fx, kind):
             list(decode(bad))
 
 
+def test_truncated_faststart_file_fails_after_emitting_samples(tmp_path, fx):
+    path = tmp_path / "truncated.mp4"
+    media.run([media.ffmpeg_bin(), "-v", "error", "-i", str(fx["video"]), "-t", "10",
+               "-c", "copy", "-movflags", "+faststart", str(path)])
+    with path.open("r+b") as stream:
+        stream.truncate(path.stat().st_size * 3 // 4)
+    for stream in (media.pcm_chunks(path, chunk_bytes=4096), media.gray_frames(path, 2, 16, 16)):
+        next(stream)  # headers and early packets are still valid
+        with pytest.raises(media.MediaError):
+            list(stream)
+
+
 def test_partial_stream_then_failed_process_reports_stderr(monkeypatch):
     original = media.subprocess.Popen
     def failed(*args, **kwargs):

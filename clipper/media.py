@@ -2,10 +2,16 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import queue
+import re
 import shutil
 import subprocess
+import threading
+from collections import deque
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterator
 
@@ -81,54 +87,102 @@ def probe(path: str | Path) -> dict:
     }
 
 
-def pcm_chunks(path: str | Path, sample_rate: int = 16000, chunk_bytes: int = 1 << 20) -> Iterator[bytes]:
-    """Stream mono 16-bit PCM from any media file without writing a WAV to disk."""
-    cmd = [ffmpeg_bin(), "-nostdin", "-v", "error", "-i", str(path), "-vn", "-ac", "1", "-ar", str(sample_rate),
-           "-f", "s16le", "-"]
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-    assert proc.stdout is not None
+def sha256_file(path: str | Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+@contextmanager
+def _decode(cmd: list[str], timestamps: bool = False):
+    """Drain diagnostics concurrently and reap the decoder on EOF, exceptions and early close."""
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    assert proc.stdout is not None and proc.stderr is not None
+    tail = deque(maxlen=12)
+    times = queue.Queue()
+
+    def drain():
+        for raw in proc.stderr:
+            line = raw.decode("utf-8", errors="replace").strip()
+            if timestamps and "Parsed_showinfo" in line:
+                stamp = re.search(r"\bpts_time:\s*([-+.\deE]+)", line)
+                if stamp:
+                    times.put(float(stamp[1]))
+            else:
+                tail.append(line)
+        times.put(None)
+
+    reader = threading.Thread(target=drain, daemon=True)
+    reader.start()
     try:
-        while True:
-            chunk = proc.stdout.read(chunk_bytes)
-            if not chunk:
-                break
-            yield chunk
+        yield proc.stdout, times
+        code = proc.wait()
+        reader.join()
+        if code:
+            raise MediaError(f"FFmpeg decode failed ({code}): " + "\n".join(tail))
     finally:
+        if proc.poll() is None:
+            proc.kill()
         proc.stdout.close()
         proc.wait()
+        reader.join()
+        proc.stderr.close()
+
+
+def pcm_chunks(path: str | Path, sample_rate: int = 16000, chunk_bytes: int = 1 << 20) -> Iterator[bytes]:
+    """Stream mono PCM. A missing stream or incomplete decode is an error."""
+    cmd = [ffmpeg_bin(), "-nostdin", "-v", "error", "-xerror", "-i", str(path), "-map", "0:a:0",
+           "-ac", "1", "-ar", str(sample_rate), "-f", "s16le", "-"]
+    total = 0
+    with _decode(cmd) as (stream, _):
+        for chunk in iter(lambda: stream.read(chunk_bytes), b""):
+            total += len(chunk)
+            yield chunk
+    if not total or total % 2:
+        raise MediaError("FFmpeg returned empty or incomplete PCM")
 
 
 def gray_frames(
     path: str | Path, fps: float, width: int, height: int, keyframes_only: bool = False,
     start: float | None = None, duration: float | None = None, crop: str | None = None,
 ) -> Iterator[tuple[float, np.ndarray]]:
-    """Yield (time, HxW uint8) frames at a fixed rate. keyframes_only makes long VODs fast to scan.
-
-    start/duration read only a window (times are then relative to start); crop is an ffmpeg crop filter.
-    """
-    cmd = [ffmpeg_bin(), "-nostdin", "-v", "error"]
+    """Regular samples use the output grid. Sparse samples carry their decoded presentation time."""
+    if fps <= 0 or min(width, height) <= 0:
+        raise ValueError("positive fps and dimensions required")
+    cmd = [ffmpeg_bin(), "-nostdin", "-nostats", "-v", "info" if keyframes_only else "error", "-xerror"]
     if keyframes_only:
         cmd += ["-skip_frame", "nokey"]
     if start is not None:
-        cmd += ["-ss", f"{max(0.0, start):.3f}"]
+        cmd += ["-ss", f"{max(0.0, start):.6f}"]
     if duration is not None:
-        cmd += ["-t", f"{max(0.0, duration):.3f}"]
-    chain = [f"fps={fps}"] + ([crop] if crop else []) + [f"scale={width}:{height}", "format=gray"]
-    cmd += ["-i", str(path), "-an", "-vf", ",".join(chain), "-f", "rawvideo", "-pix_fmt", "gray", "-"]
+        cmd += ["-t", f"{max(0.0, duration):.6f}"]
+    sampling = (f"select='isnan(prev_selected_t)+gte(t-prev_selected_t,{1 / fps})'"
+                if keyframes_only else f"fps={fps}:start_time=0")
+    chain = [sampling] + ([crop] if crop else []) + [f"scale={width}:{height}", "format=gray"]
+    if keyframes_only:
+        chain.append("showinfo")
+    cmd += ["-i", str(path), "-map", "0:v:0", "-vf", ",".join(chain), "-vsync", "0",
+            "-threads:v", "1", "-f", "rawvideo", "-pix_fmt", "gray", "-"]
     size = width * height
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
-    assert proc.stdout is not None
-    index = 0
-    try:
-        while True:
-            buf = proc.stdout.read(size)
-            if len(buf) < size:
-                break
-            yield index / fps, np.frombuffer(buf, dtype=np.uint8).reshape(height, width)
-            index += 1
-    finally:
-        proc.stdout.close()
-        proc.wait()
+    count = 0
+    with _decode(cmd, keyframes_only) as (stream, times):
+        for buf in iter(lambda: stream.read(size), b""):
+            if len(buf) != size:
+                raise MediaError("FFmpeg returned a partial video frame")
+            stamp = count / fps
+            if keyframes_only:
+                try:
+                    stamp = times.get(timeout=5)
+                except queue.Empty as exc:
+                    raise MediaError("FFmpeg omitted the decoded frame timestamp") from exc
+                if stamp is None:
+                    raise MediaError("FFmpeg omitted the decoded frame timestamp")
+            yield stamp, np.frombuffer(buf, dtype=np.uint8).reshape(height, width)
+            count += 1
+    if not count:
+        raise MediaError("FFmpeg returned no video frames")
 
 
 def bgr_frame_at(path: str | Path, t: float, src_size: tuple[int, int], width: int = 640) -> np.ndarray | None:
@@ -136,7 +190,10 @@ def bgr_frame_at(path: str | Path, t: float, src_size: tuple[int, int], width: i
     height = max(2, int(round(width * src_h / max(1, src_w) / 2)) * 2)
     cmd = [ffmpeg_bin(), "-nostdin", "-v", "error", "-ss", f"{max(0.0, t):.3f}", "-i", str(path), "-frames:v", "1",
            "-vf", f"scale={width}:{height}", "-f", "rawvideo", "-pix_fmt", "bgr24", "-"]
-    out = subprocess.run(cmd, capture_output=True).stdout
+    result = subprocess.run(cmd, capture_output=True)
+    if result.returncode:
+        raise MediaError(f"FFmpeg frame decode failed: {result.stderr[-2000:].decode(errors='replace')}")
+    out = result.stdout
     need = width * height * 3
     if len(out) < need:
         return None

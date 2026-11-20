@@ -140,6 +140,18 @@ def detect(
         sig = {name: round(float(np.max(signals[name][lo:hi])), 2)
                for name in SIGNAL_NAMES if name in signals and len(signals[name][lo:hi])}
         flags: dict[str, Any] = {}
+        # Store measured cut cues with the candidate so rendering needs no second signal pass.
+        cues = set()
+        for edge in (start, end):
+            if db is not None and db.size:
+                quiet = _quietest(db, edge - search, edge + search, hop, edge)
+                i = int(quiet / hop)
+                if 0 <= i < len(db) and db[i] < -35:
+                    cues.add(quiet)
+        for t_scene in signals.get("_scene_boundaries", []):
+            if min(abs(t_scene - start), abs(t_scene - end)) <= search:
+                cues.add(float(t_scene))
+        flags["boundary_cues"] = sorted(cues)
         if cine is not None and cine.size:
             frac = float(np.mean(cine[int(start / hop):max(int(start / hop) + 1, int(end / hop))]))
             flags["cinematic"] = round(frac, 2)

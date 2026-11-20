@@ -120,7 +120,7 @@ def render_clip(
     return out_path
 
 
-def validate_clip(path: Path, duration: float, settings: dict, has_audio: bool) -> None:
+def validate_clip(path: Path, duration: float, settings: dict, has_audio: bool) -> dict:
     info = media.probe(path)
     tolerance = max(0.2, 2 / settings["fps"])
     lengths = [info["duration"], info["video_duration"]]
@@ -133,6 +133,7 @@ def validate_clip(path: Path, duration: float, settings: dict, has_audio: bool) 
         raise media.MediaError(f"Render failed stream or duration checks: {info}")
     media.run([media.ffmpeg_bin(), "-nostdin", "-v", "error", "-xerror", "-i", str(path),
                "-map", "0:v:0", "-map", "0:a?", "-f", "null", "-"])
+    return info
 
 
 def make_cover(video: str | Path, t: float, out_jpg: str | Path) -> Path:

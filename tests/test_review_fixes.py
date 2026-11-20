@@ -84,7 +84,7 @@ def test_render_refuses_a_clip_whose_captions_are_missing(whisper_source, cfg, m
 
 # --- 2 [P2] first-version transcript.json ----------------------------------------------------------------------------
 
-def test_first_version_transcript_is_adopted_and_captions_render(cfg, fx, monkeypatch):
+def test_first_version_transcript_needs_explicit_binding_and_then_renders(cfg, fx, monkeypatch):
     conn = db.connect(cfg)
     sid = pipeline.ingest(conn, cfg, fx["video"], rights="test:synthetic", chat_file=fx["chat"],
                           clips_file=fx["clips"])
@@ -93,26 +93,28 @@ def test_first_version_transcript_is_adopted_and_captions_render(cfg, fx, monkey
     legacy = _fixture_transcript(fx)
     (wd / "transcript.json").write_text(json.dumps(legacy, ensure_ascii=False), encoding="utf-8")
     logs: list[str] = []
+    src = db.get_source(conn, sid)
+    assert pipeline.get_transcript(cfg, src, transcribe=False, log=logs.append) is None
+    pipeline.bind_transcript(fx["video"], wd / "transcript.json", wd, src["duration"])
     pipeline.analyze(conn, cfg, sid, transcribe=False, log=logs.append)
     cand = db.list_candidates(conn, sid)[0]
     captured = _capture_ass(monkeypatch)
     with pytest.raises(_Stop):
         pipeline.render_candidates(conn, cfg, sid, [cand["id"]], ["tiktok"], log=logs.append)
     assert _events(captured[0], "Sub"), "the first-version transcript was ignored: no captions"
-    assert tr.load(wd / "transcript.imported.json") == legacy
+    assert tr.load(wd / "transcript.bound.json")["transcript"] == legacy
     assert (wd / "transcript.json").exists(), "the original file must stay where it was"
-    assert sum("transcript.imported.json" in m for m in logs) == 1, logs
+    assert sum("no recording identity" in m for m in logs) == 1, logs
 
 
-def test_force_can_regenerate_a_legacy_transcript_after_adoption(cfg, tmp_path, monkeypatch):
+def test_force_can_generate_speech_while_preserving_unbound_legacy(cfg, tmp_path, monkeypatch):
     video = tmp_path / "source.mp4"
     video.touch()
     source = {"id": 1, "path": str(video)}
     folder = pipeline.workdir(cfg, 1)
     old = {"segments": []}
     tr.save(folder / "transcript.json", old)
-    assert pipeline.get_transcript(cfg, source, transcribe=False) == old
-    (folder / "transcript.imported.json").unlink()
+    assert pipeline.get_transcript(cfg, source, transcribe=False) is None
     fresh = {"language": "fr", "segments": []}
     monkeypatch.setattr(tr, "transcribe", lambda *args: fresh)
     assert pipeline.get_transcript(cfg, source, force=True) == fresh

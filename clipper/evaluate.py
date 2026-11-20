@@ -31,23 +31,72 @@ def truth_from_labels(labels: list[dict]) -> list[tuple[float, float]]:
     return sorted((float(r["start_s"]), float(r["end_s"])) for r in labels if int(r["label"]) == 1)
 
 
-def match(start: float, end: float, peak: float, truth: list[tuple[float, float]], min_overlap_s: float = 3.0) -> int | None:
-    choices = []
-    for i, (ts, te) in enumerate(truth):
-        inter = max(0.0, min(end, te) - max(start, ts))
-        inside = ts <= peak <= te
-        if inside or inter >= min(min_overlap_s, 0.5 * (te - ts)):
-            choices.append((inside, inter, -abs(peak - (ts + te) / 2), -i))
-    return -max(choices)[-1] if choices else None
+def _quality(cand: dict, event: tuple[float, float]) -> float:
+    start, end, peak = cand["start"], cand["end"], cand["peak"]
+    left, right = event
+    overlap = max(0.0, min(end, right) - max(start, left))
+    inside = left <= peak <= right
+    if end <= start or right <= left or (not inside and overlap < min(3.0, (right - left) / 2)):
+        return 0.0
+    iou = overlap / (max(end, right) - min(start, left))
+    proximity = 1 / (1 + abs(peak - (left + right) / 2) / (right - left))
+    return (2 * inside + iou + proximity) / 4
+
+
+def _assign(costs: list[list[float]]) -> list[int]:
+    """Rectangular Hungarian assignment; one private dummy column per candidate allows any number of misses."""
+    rows, cols = len(costs), len(costs[0])
+    row_price, col_price = [0.0] * (rows + 1), [0.0] * (cols + 1)
+    owner, previous = [0] * (cols + 1), [0] * (cols + 1)
+    for row in range(1, rows + 1):
+        owner[0] = row
+        column = 0
+        remaining = [float("inf")] * (cols + 1)
+        visited = [False] * (cols + 1)
+        while owner[column]:
+            visited[column] = True
+            active = owner[column]
+            delta = float("inf")
+            for j in range(1, cols + 1):
+                if visited[j]:
+                    continue
+                reduced = costs[active - 1][j - 1] - row_price[active] - col_price[j]
+                if reduced < remaining[j]:
+                    remaining[j], previous[j] = reduced, column
+                if remaining[j] < delta:
+                    delta, next_column = remaining[j], j
+            for j in range(cols + 1):
+                if visited[j]:
+                    row_price[owner[j]] += delta
+                    col_price[j] -= delta
+                else:
+                    remaining[j] -= delta
+            column = next_column
+        while column:
+            prior = previous[column]
+            owner[column] = owner[prior]
+            column = prior
+    assignment = [-1] * rows
+    for j in range(1, cols + 1):
+        if owner[j]:
+            assignment[owner[j] - 1] = j - 1
+    return assignment
 
 
 def evaluate(cands: list[dict], truth: list[tuple[float, float]], k: int = 10) -> dict:
-    top = cands[:k]
-    remaining = list(range(len(truth)))
-    hits = []
-    for c in top:
-        pos = match(c["start"], c["end"], c["peak"], [truth[i] for i in remaining])
-        hits.append(None if pos is None else remaining.pop(pos))
+    """One-to-one hits divided by returned top-k predictions (precision) and truth events (recall)."""
+    top = cands[:max(k, 0)]
+    hits = [None] * len(top)
+    if top and truth:
+        order = sorted(range(len(top)), key=lambda i: (top[i]["start"], top[i]["end"], top[i]["peak"]))
+        costs = []
+        for i in order:
+            qualities = [_quality(top[i], event) for event in truth]
+            # One extra hit outweighs every possible quality improvement across all rows.
+            costs.append([-(len(top) + 1 + q) if q else 1 for q in qualities] + [0] * len(top))
+        for i, j in zip(order, _assign(costs)):
+            if j < len(truth):
+                hits[i] = j
     found = {h for h in hits if h is not None}
     precision = len(found) / len(top) if top else 0.0
     recall = len(found) / len(truth) if truth else 0.0

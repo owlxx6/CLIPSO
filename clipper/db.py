@@ -188,14 +188,15 @@ def _rows(rows: Iterable[sqlite3.Row]) -> list[dict]:
 
 # --- sources -----------------------------------------------------------------------------------------------------
 
-def add_source(conn: sqlite3.Connection, **fields: Any) -> int:
+def add_source(conn: sqlite3.Connection, *, commit: bool = True, **fields: Any) -> int:
     fields["rights"] = (fields.get("rights") or "").strip()
     if not fields["rights"]:
         raise ValueError("rights is required: say where your permission to clip this video comes from")
     keys = ",".join(fields)
     marks = ",".join("?" for _ in fields)
     cur = conn.execute(f"INSERT INTO sources ({keys}) VALUES ({marks})", tuple(fields.values()))
-    conn.commit()
+    if commit:
+        conn.commit()
     return int(cur.lastrowid)
 
 

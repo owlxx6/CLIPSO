@@ -67,7 +67,7 @@ def check(meta: dict, policy: dict, *, technical: bool, evidence: dict | None = 
     duration = meta.get("duration_s")
     if not limits or type(duration) not in (int, float) or not limits[0] <= duration <= limits[1]:
         blocks.append("duration unverified or outside range")
-    caption = meta.get("caption") or ""
+    caption = meta.get("caption") if isinstance(meta.get("caption"), str) else ""
     for field, prefix in (("hashtags", "#"), ("mentions", "@")):
         terms = policy.get(field)
         if not isinstance(terms, list):
@@ -106,7 +106,8 @@ def check(meta: dict, policy: dict, *, technical: bool, evidence: dict | None = 
         blocks.append("permission for this recording lacks evidence")
     if policy.get("manual_review") is True and not human:
         blocks.append("human approval required")
-    return {"version": 1, "checked_at": now.isoformat(), "export_key": export_key, "policy_sha256": policy_hash,
+    return {"version": 1, "campaign": meta.get("campaign"), "terms_evidence": policy.get("terms_evidence"),
+            "rights_evidence": policy.get("rights_evidence"), "checked_at": now.isoformat(), "export_key": export_key, "policy_sha256": policy_hash,
             "technically_valid": technical, "rights_verified": rights, "campaign_rules_satisfied": rules,
             "human_approved": human, "submitted": _text(evidence.get("submission")),
             "approved_by_campaign": _text(evidence.get("campaign_approval")), "paid": _text(evidence.get("payment")),

@@ -12,6 +12,7 @@ import subprocess
 import threading
 from collections import deque
 from contextlib import contextmanager
+from functools import lru_cache
 from pathlib import Path
 from typing import Iterator
 
@@ -144,6 +145,13 @@ def pcm_chunks(path: str | Path, sample_rate: int = 16000, chunk_bytes: int = 1 
         raise MediaError("FFmpeg returned empty or incomplete PCM")
 
 
+@lru_cache(maxsize=8)
+def _passthrough_option(executable: str) -> list[str]:
+    # FFmpeg 4.4 accepts -vsync; newer builds provide the per-stream -fps_mode replacement.
+    help_text = run([executable, "-hide_banner", "-h", "full"]).stdout
+    return ["-fps_mode", "passthrough"] if "-fps_mode" in help_text else ["-vsync", "0"]
+
+
 def gray_frames(
     path: str | Path, fps: float, width: int, height: int, keyframes_only: bool = False,
     start: float | None = None, duration: float | None = None, crop: str | None = None,
@@ -163,8 +171,10 @@ def gray_frames(
     chain = [sampling] + ([crop] if crop else []) + [f"scale={width}:{height}", "format=gray"]
     if keyframes_only:
         chain.append("showinfo")
-    cmd += ["-i", str(path), "-map", "0:v:0", "-vf", ",".join(chain), "-vsync", "0",
-            "-threads:v", "1", "-f", "rawvideo", "-pix_fmt", "gray", "-"]
+    cmd += ["-i", str(path), "-map", "0:v:0", "-vf", ",".join(chain)]
+    if keyframes_only:
+        cmd += _passthrough_option(cmd[0])
+    cmd += ["-threads:v", "1", "-f", "rawvideo", "-pix_fmt", "gray", "-"]
     size = width * height
     count = 0
     with _decode(cmd, keyframes_only) as (stream, times):

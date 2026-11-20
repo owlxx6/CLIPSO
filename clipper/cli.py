@@ -221,7 +221,9 @@ def cmd_campaign_check(args) -> int:
     evidence = tr.load(args.evidence) if args.evidence else {}
     if not isinstance(meta, dict) or not isinstance(evidence, dict):
         raise ValueError("metadata and evidence must be JSON objects")
-    receipt = meta.get("validation") or {}
+    receipt = meta.get("validation")
+    if not isinstance(receipt, dict):
+        receipt = {}
     technical = (receipt.get("technically_valid") is True and path.is_file()
                  and meta.get("artifact_sha256") == media.sha256_file(path)
                  and meta.get("source_id") == source["id"] and meta.get("candidate_id") == row["candidate_id"]
@@ -247,6 +249,7 @@ def cmd_posted(args) -> int:
 
 
 def cmd_label(args) -> int:
+    args.source = args.source if args.source is not None else args.source_option
     conn, _, _ = _open(args.source)
     if args.truth:
         windows = evaluate.load_truth(args.truth)
@@ -407,9 +410,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_posted)
 
     s = sub.add_parser("label", help="store ground truth: a CSV of highlights, or one candidate good/bad")
-    s.add_argument("source", type=int)
-    s.add_argument("--truth", help="CSV with start,end (seconds or HH:MM:SS)")
-    s.add_argument("--candidate", type=int)
+    source_arg = s.add_mutually_exclusive_group(required=True)
+    source_arg.add_argument("source", type=int, nargs="?")
+    source_arg.add_argument("--source", type=int, dest="source_option")
+    selection = s.add_mutually_exclusive_group(required=True)
+    selection.add_argument("--truth", help="CSV with start,end (seconds or HH:MM:SS)")
+    selection.add_argument("--candidate", type=int)
     s.add_argument("--good", action="store_true")
     s.add_argument("--bad", action="store_true")
     s.set_defaults(func=cmd_label)

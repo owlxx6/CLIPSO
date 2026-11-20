@@ -75,7 +75,7 @@ def plan_variants(
             min_s = max(min_s, duration_limits[0])
             max_s = min(max_s, duration_limits[1])
         rng = random.Random(f"{cand_id}:{platform}")
-        radius = max(2.0, float(cfg["detection"]["snap_search_s"]))
+        radius = max(float(pcfg.get("trim_jitter_s", 1.2)), float(cfg["detection"]["snap_search_s"]))
         starts = _edge_options(start, end, peak, duration, min_s, max_s, radius, True, segments, words, cues)
         ends = _edge_options(end, start, peak, duration, min_s, max_s, radius, False, segments, words, cues)
         pre = min(peak - start, float(cfg["detection"]["pre_roll_s"]), max_s * 0.5)

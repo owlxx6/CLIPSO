@@ -154,8 +154,9 @@ def get_transcript(cfg: dict, source: dict, transcribe: bool = True, log=print, 
     """
     wd = workdir(cfg, source["id"])
     bound = tr.load(wd / "transcript.bound.json")
-    if bound is not None:
-        if bound.get("version") == 1 and bound.get("source_sha256") == (source_digest or media.sha256_file(source["path"])):
+    source_digest = source_digest or media.sha256_file(source["path"])
+    if isinstance(bound, dict):
+        if bound.get("version") == 1 and bound.get("source_sha256") == source_digest:
             return bound["transcript"]
         log("recording fingerprint changed; ignoring its previous imported transcript")
     elif any((wd / name).exists() for name in ("transcript.imported.json", "transcript.json")):
@@ -164,9 +165,15 @@ def get_transcript(cfg: dict, source: dict, transcribe: bool = True, log=print, 
     tcfg = dict(cfg["analysis"]["transcript"])
     if source.get("language"):
         tcfg["language"] = source["language"]
-    key = {"source": _source_key(source), "settings": tcfg}
+    key = {"source": dict(_source_key(source), sha256=source_digest), "settings": tcfg}
     cached = tr.load(path)
     can_transcribe = transcribe and tcfg.get("enabled", True)
+    # Older generated records can be identified by their source path, size and nanosecond mtime.
+    # Preserve those records unless an explicit import already contradicts that identification.
+    if cached and bound is None and cached["key"]["source"] == _source_key(source):
+        if not force and (not can_transcribe or cached["key"]["settings"] == tcfg):
+            log("using earlier generated speech with matching file metadata; analyze --force upgrades its recording identity")
+            return cached["transcript"]
     if cached and cached["key"] == key and not force:
         return cached["transcript"]
     if can_transcribe:

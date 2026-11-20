@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from clipper import cli, db, evaluate, media, pipeline, variants
+from clipper import cli, db, detect, evaluate, media, pipeline, variants
 from clipper.signals import transcript as tr
 
 
@@ -15,7 +15,7 @@ def test_label_verifies_source_before_writing(source, cfg, fx):
     other = pipeline.ingest(conn, cfg, fx["video"], rights="synthetic second source")
     db.replace_candidates(conn, sid, [{"start": 10, "end": 30, "peak": 23, "score": 1}])
     cid = str(db.list_candidates(conn, sid)[0]["id"])
-    assert cli.main(["label", str(other), "--candidate", cid, "--good"]) != 0
+    assert cli.main(["label", "--source", str(other), "--candidate", cid, "--good"]) != 0
     assert not db.list_labels(conn, other) and not db.list_labels(conn, sid)
     assert cli.main(["label", str(sid), "--candidate", cid, "--good"]) == 0
     assert db.list_labels(conn, sid)[0]["label"] == 1
@@ -126,3 +126,23 @@ def test_cut_planner_preserves_words_and_setup(cfg):
         assert plan.start <= 9.5 and plan.end >= 31 and 20 <= plan.end - plan.start <= 24
     silent = variants.plan_variants(4, 10, 30, 21, 60, ["tiktok"], cfg, cues=[9.75, 30.25])[0]
     assert (silent.start, silent.end) == (9.75, 30.25)
+
+
+def test_detection_repairs_a_word_split_by_duration_fitting():
+    words = [{"start": 10, "end": 11.5}, {"start": 29.5, "end": 31}]
+    result = detect._protect_words(10.5, 30.5, 20, 50, 15, 20, words)
+    assert result is not None
+    left, right = result
+    assert 15 <= right - left <= 20
+    assert all(not w["start"] < cut < w["end"] for cut in result for w in words)
+
+def test_generated_cache_also_distinguishes_same_stat_replacement(cfg, tmp_path, monkeypatch):
+    video = tmp_path / "source"
+    video.write_bytes(b"first")
+    src = {"id": 3, "path": str(video)}
+    monkeypatch.setattr(tr, "transcribe", lambda *_: {"segments": []})
+    assert pipeline.get_transcript(cfg, src) == {"segments": []}
+    stat = video.stat()
+    video.write_bytes(b"other")
+    os.utime(video, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    assert pipeline.get_transcript(cfg, src, transcribe=False) is None

@@ -31,16 +31,23 @@ def truth_from_labels(labels: list[dict]) -> list[tuple[float, float]]:
     return sorted((float(r["start_s"]), float(r["end_s"])) for r in labels if int(r["label"]) == 1)
 
 
-def _quality(cand: dict, event: tuple[float, float]) -> float:
+def _quality(cand: dict, event: tuple[float, float], min_overlap_s: float = 3.0) -> float:
     start, end, peak = cand["start"], cand["end"], cand["peak"]
     left, right = event
     overlap = max(0.0, min(end, right) - max(start, left))
     inside = left <= peak <= right
-    if end <= start or right <= left or (not inside and overlap < min(3.0, (right - left) / 2)):
+    if end <= start or right <= left or (not inside and overlap < min(min_overlap_s, (right - left) / 2)):
         return 0.0
     iou = overlap / (max(end, right) - min(start, left))
     proximity = 1 / (1 + abs(peak - (left + right) / 2) / (right - left))
     return (2 * inside + iou + proximity) / 4
+
+
+def match(start: float, end: float, peak: float, truth: list[tuple[float, float]], min_overlap_s: float = 3.0) -> int | None:
+    """Best individual event for callers inspecting one prediction."""
+    cand = {"start": start, "end": end, "peak": peak}
+    scores = [_quality(cand, event, min_overlap_s) for event in truth]
+    return max(range(len(scores)), key=scores.__getitem__) if any(scores) else None
 
 
 def _assign(costs: list[list[float]]) -> list[int]:

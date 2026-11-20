@@ -41,11 +41,10 @@ def test_no_face_means_no_facecam(cfg, fx):
 @pytest.mark.slow
 @pytest.mark.skipif(importlib.util.find_spec("skimage") is None, reason="scikit-image provides a public-domain face")
 def test_detects_real_face_in_overlay(cfg, tmp_path):
-    import cv2
     import skimage.data
 
     face_png = tmp_path / "face.png"
-    cv2.imwrite(str(face_png), skimage.data.astronaut()[:, :, ::-1])  # NASA portrait, public domain
+    media.write_image(face_png, skimage.data.astronaut()[:, :, ::-1])  # NASA portrait, public domain
     texture = fixture.make_texture(tmp_path / "texture.png", (640, 360))
     video = tmp_path / "stream.mp4"
     subprocess.run([media.ffmpeg_bin(), "-v", "error", "-y", "-i", str(texture), "-loop", "1", "-i", str(face_png),

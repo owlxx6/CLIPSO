@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+import tempfile
 from pathlib import Path
 
 from clipper import config, media
@@ -119,7 +120,7 @@ def render_clip(
     return out_path
 
 
-def validate_clip(path: Path, duration: float, settings: dict, has_audio: bool) -> None:
+def validate_clip(path: Path, duration: float, settings: dict, has_audio: bool) -> dict:
     info = media.probe(path)
     tolerance = max(0.2, 2 / settings["fps"])
     lengths = [info["duration"], info["video_duration"]]
@@ -132,6 +133,7 @@ def validate_clip(path: Path, duration: float, settings: dict, has_audio: bool) 
         raise media.MediaError(f"Render failed stream or duration checks: {info}")
     media.run([media.ffmpeg_bin(), "-nostdin", "-v", "error", "-xerror", "-i", str(path),
                "-map", "0:v:0", "-map", "0:a?", "-f", "null", "-"])
+    return info
 
 
 def make_cover(video: str | Path, t: float, out_jpg: str | Path) -> Path:
@@ -147,7 +149,10 @@ def make_proxy(src: str | Path, start: float, end: float, out_path: str | Path, 
     if out_path.exists():
         return out_path
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    media.run([media.ffmpeg_bin(), "-nostdin", "-y", "-v", "error", "-ss", f"{start:.3f}", "-t", f"{end - start:.3f}",
-               "-i", str(src), "-vf", f"scale=-2:{height}", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "30",
-               "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", str(out_path)])
+    with tempfile.TemporaryDirectory(dir=out_path.parent, prefix=".pending-") as folder:
+        staged = Path(folder) / out_path.name  # an interrupted encode never sits at the cached name
+        media.run([media.ffmpeg_bin(), "-nostdin", "-y", "-v", "error", "-ss", f"{start:.3f}", "-t",
+                   f"{end - start:.3f}", "-i", str(src), "-vf", f"scale=-2:{height}", "-c:v", "libx264", "-preset",
+                   "ultrafast", "-crf", "30", "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", str(staged)])
+        staged.replace(out_path)
     return out_path

@@ -21,7 +21,7 @@ def letterbox_curve(path: str | Path, duration: float, hop_s: float, vcfg: dict)
     w, h = 160, 90
     bar = max(1, int(round(h * frac)))
     out = np.zeros(n, dtype=np.float32)
-    for t, frame in gray_frames(path, fps=1.0 / every, width=w, height=h, keyframes_only=True):
+    for t, frame in gray_frames(path, fps=1.0 / every, width=w, height=h):
         top = float(frame[:bar].mean())
         bottom = float(frame[-bar:].mean())
         middle = float(frame[bar:-bar].mean())

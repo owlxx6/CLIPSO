@@ -35,8 +35,7 @@ def make_texture(path: Path, size: tuple[int, int], seed: int = 7) -> Path:
     w, h = size
     rng = np.random.default_rng(seed)
     grid = rng.integers(60, 200, size=(max(6, round(18 * h / w)), 18, 3), dtype=np.uint8)
-    cv2.imwrite(str(path), cv2.resize(grid, (3 * w, 3 * h), interpolation=cv2.INTER_CUBIC))
-    return path
+    return media.write_image(path, cv2.resize(grid, (3 * w, 3 * h), interpolation=cv2.INTER_CUBIC))
 
 
 def make_video(path: Path, duration: float = 180.0, size: tuple[int, int] = (1280, 720)) -> Path:

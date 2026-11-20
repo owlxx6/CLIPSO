@@ -92,6 +92,10 @@ clipper demo               # end-to-end run on the synthetic stream; must print 
 - `TASKS.md` is the shared log. Take one task, mark it `in progress (claude)` or `in progress (codex)`, and
   when it is merged move it to Done with the date and one line on what changed.
 
+## Repository skills
+
+Use [clipper-verify](.agents/skills/clipper-verify/SKILL.md) for a synthetic end-to-end verification and [clipper-review](.agents/skills/clipper-review/SKILL.md) for a branch or working-tree audit.
+
 ## Definition of done
 
 - `pytest -q` green, `clipper doctor` ready, `clipper demo` still at precision@3 = 1.0.

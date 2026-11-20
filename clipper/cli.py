@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import json
 import os
 import subprocess
 import sys
 from pathlib import Path
 
-from clipper import __version__, config, db, evaluate, fixture, media, pipeline
+from clipper import __version__, campaign, config, db, evaluate, fixture, media, pipeline
 from clipper import layout as layout_mod
 from clipper.config import FONTS_DIR
 from clipper.signals import transcript as tr
@@ -126,6 +127,13 @@ def cmd_ingest(args) -> int:
     return 0
 
 
+def cmd_import_transcript(args) -> int:
+    _, cfg, source = _open(args.source)
+    pipeline.bind_transcript(Path(source["path"]), Path(args.file), pipeline.workdir(cfg, args.source), source["duration"])
+    print(f"Transcript bound to recording #{args.source}")
+    return 0
+
+
 def cmd_sources(args) -> int:
     conn = db.connect(config.load_config())
     for s in db.list_sources(conn):
@@ -202,6 +210,37 @@ def cmd_exports(args) -> int:
     return 0
 
 
+def cmd_campaign_check(args) -> int:
+    conn = db.connect(config.load_config())
+    row = conn.execute("SELECT * FROM exports WHERE id=?", (args.export,)).fetchone()
+    if row is None:
+        raise ValueError(f"unknown export #{args.export}")
+    source = db.get_source(conn, row["source_id"])
+    path = Path(row["path"])
+    meta = tr.load(path.with_suffix(".json")) or {}
+    evidence = tr.load(args.evidence) if args.evidence else {}
+    if not isinstance(meta, dict) or not isinstance(evidence, dict):
+        raise ValueError("metadata and evidence must be JSON objects")
+    receipt = meta.get("validation")
+    if not isinstance(receipt, dict):
+        receipt = {}
+    technical = (receipt.get("technically_valid") is True and path.is_file()
+                 and meta.get("artifact_sha256") == media.sha256_file(path)
+                 and meta.get("source_id") == source["id"] and meta.get("candidate_id") == row["candidate_id"]
+                 and meta.get("platform") == row["platform"] and meta.get("start") == row["start_s"]
+                 and meta.get("end") == row["end_s"])
+    policy = campaign.policy_for(pipeline.source_config(source), source.get("campaign"))
+    original = campaign.check(meta, policy, technical=technical)
+    technical = technical and receipt.get("export_key") == original["export_key"]
+    if source.get("campaign") != meta.get("campaign") or source["rights"] != meta.get("rights"):
+        meta["rights"] = None
+    caption = path.with_suffix(".txt")
+    meta["caption"] = caption.read_text(encoding="utf-8-sig").strip() if caption.is_file() else ""
+    report = campaign.check(meta, policy, technical=technical, evidence=evidence)
+    print(json.dumps(report, ensure_ascii=False, indent=2))
+    return 0 if report["ready_for_submission"] else 1
+
+
 def cmd_posted(args) -> int:
     conn = db.connect(config.load_config())
     db.add_post(conn, args.export, args.url, account=args.account)
@@ -210,6 +249,7 @@ def cmd_posted(args) -> int:
 
 
 def cmd_label(args) -> int:
+    args.source = args.source if args.source is not None else args.source_option
     conn, _, _ = _open(args.source)
     if args.truth:
         windows = evaluate.load_truth(args.truth)
@@ -221,6 +261,8 @@ def cmd_label(args) -> int:
         print("use --truth FILE, or --candidate ID with --good or --bad")
         return 1
     cand = db.get_candidate(conn, args.candidate)
+    if cand["source_id"] != args.source:
+        raise ValueError(f"candidate #{args.candidate} belongs to source #{cand['source_id']}")
     db.add_label(conn, args.source, cand["start_s"], cand["end_s"], 1 if args.good else 0)
     print(f"candidate #{args.candidate} labelled {'good' if args.good else 'bad'}")
     return 0
@@ -308,6 +350,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--transcript", help="existing transcript JSON (skips Whisper)")
     s.set_defaults(func=cmd_ingest)
 
+    s = sub.add_parser("import-transcript", help="explicitly bind a verified transcript to the current recording")
+    s.add_argument("source", type=int)
+    s.add_argument("file")
+    s.set_defaults(func=cmd_import_transcript)
+
     sub.add_parser("sources", help="list ingested videos").set_defaults(func=cmd_sources)
 
     s = sub.add_parser("analyze", help="compute signals and highlight candidates")
@@ -351,6 +398,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--platform")
     s.set_defaults(func=cmd_exports)
 
+    s = sub.add_parser("campaign-check", help="evaluate an export against current campaign terms and evidence")
+    s.add_argument("export", type=int)
+    s.add_argument("--evidence", help="local JSON file containing export-specific review and outcome evidence")
+    s.set_defaults(func=cmd_campaign_check)
+
     s = sub.add_parser("posted", help="record that an export was posted (it will never be replaced)")
     s.add_argument("export", type=int, help="export id, see `clipper exports`")
     s.add_argument("--url", required=True, help="link to the post")
@@ -358,9 +410,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=cmd_posted)
 
     s = sub.add_parser("label", help="store ground truth: a CSV of highlights, or one candidate good/bad")
-    s.add_argument("source", type=int)
-    s.add_argument("--truth", help="CSV with start,end (seconds or HH:MM:SS)")
-    s.add_argument("--candidate", type=int)
+    source_arg = s.add_mutually_exclusive_group(required=True)
+    source_arg.add_argument("source", type=int, nargs="?")
+    source_arg.add_argument("--source", type=int, dest="source_option")
+    selection = s.add_mutually_exclusive_group(required=True)
+    selection.add_argument("--truth", help="CSV with start,end (seconds or HH:MM:SS)")
+    selection.add_argument("--candidate", type=int)
     s.add_argument("--good", action="store_true")
     s.add_argument("--bad", action="store_true")
     s.set_defaults(func=cmd_label)

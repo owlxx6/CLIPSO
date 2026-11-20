@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from clipper import config
 
 PLAY_W, PLAY_H = 1080, 1920
@@ -30,7 +32,8 @@ def ass_time(t: float) -> str:
 
 
 def clean(text: str) -> str:
-    return text.replace("\\", "/").replace("{", "(").replace("}", ")").replace("\n", " ").strip()
+    text = re.sub(r"[\x00-\x1f\x7f]", " ", text)  # libass ends a line at CR as well as at LF
+    return text.replace("\\", "/").replace("{", "(").replace("}", ")").strip()
 
 
 def chunk_words(words: list[dict], max_words: int = 3, max_chars: int = 18, max_gap: float = 0.6) -> list[list[dict]]:

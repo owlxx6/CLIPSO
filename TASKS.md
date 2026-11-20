@@ -2,9 +2,16 @@
 
 Shared log for the humans and agents working on this repo (see AGENTS.md). One task per agent at a time.
 
-## In progress
+## Production hardening review
 
-(nothing)
+- Feature branch `fix/production-hardening` includes the reviewed fixes, the repository verification/review skills and the remaining November 20 audit work. Cross-source labeling and sidecar-copy rollback now have regression tests.
+- Imported transcript reuse requires explicit recording identity. Global highlight evaluation, deterministic speech-aware platform cuts, streamed FFmpeg failure detection and campaign evidence checks are implemented.
+- All 128 tests passed locally on Windows with zero skips. Track the Python 3.11 Linux/Windows checks and the six-export demo in the [hardening report](docs/PRODUCTION_HARDENING_REPORT.md). The first authorized real-recording benchmark is pending access to recordings, complete event labels and verified campaign terms.
+- Phase 3 begins with a single-cut EditPlan round trip through the existing renderer and an ExportReceipt replay check. Evaluate pacing and facecam experiments separately after measuring the current editor on the held-out recordings.
+
+## November 20 review history
+
+The earlier `fix/review-2026-11-20` branch passed 78 synthetic tests, including the original stabilization probes. It preserved edited hooks, made Unicode image paths work, used the configured paid label and handled locked replacement files. This sprint supersedes automatic legacy transcript adoption with explicit operator binding.
 
 ## Next, in order
 

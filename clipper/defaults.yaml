@@ -112,20 +112,23 @@ render:
 captions:
   template: "{hook} | {streamer} sur GTA VI #GTA6 #GTAVI"
 
+# Key policies by the exact campaign ID from ingest. See README for the required verified fields.
+campaigns: {}
+
 platforms:
   tiktok:
     target: campaign
-    trim_jitter_s: 1.2
+    trim_jitter_s: 1.2  # minimum boundary search radius in seconds
     zoom_choices: [1.0, 1.04]
     highlight_color: "#FFE500"
   instagram:
     target: campaign
-    trim_jitter_s: 1.2
+    trim_jitter_s: 1.2  # minimum boundary search radius in seconds
     zoom_choices: [1.02, 1.06]
     highlight_color: "#00E5FF"
   youtube:
     target: campaign
-    trim_jitter_s: 1.2
+    trim_jitter_s: 1.2  # minimum boundary search radius in seconds
     zoom_choices: [1.0, 1.08]
     highlight_color: "#7CFF4F"
 

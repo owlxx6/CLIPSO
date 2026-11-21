@@ -54,32 +54,39 @@ def _hooks(segments, start, end, peak):
     return suggestions
 
 
-def _timing(segments, first, last, peak, duration, cfg, cuts, gameplay, hop, scene_start, ceiling):
+def _timing(segments, first, last, peak, duration, cfg, cuts, gameplay, hop, scene_start, ceiling, story):
     setup = max(scene_start, first - cfg["setup_margin_s"])
+    earliest = max(scene_start, min(setup, first - min(cfg["max_setup_s"], cfg["speech_setup_s"])))
+    if story:
+        # A timed question and its completed answer provide their own context and endpoint.
+        setup = max(scene_start, min(setup, story[0]))
+        earliest = min(earliest, setup)
+        last = max(last, story[1])
+    scene_ceiling = ceiling
+    ceiling = min(ceiling, last + cfg["speech_continuation_s"])
     end = min(ceiling, last + cfg["settle_s"])
-    earliest = max(scene_start, first - cfg["max_setup_s"])
-    nearby = [s for s in segments if s["end"] >= earliest and s["start"] < min(ceiling, setup + cfg["max_s"])]
+    nearby = [s for s in segments if s["end"] >= earliest and s["start"] < min(scene_ceiling, setup + cfg["max_s"])]
     bridged = False
 
-    def continuing_picture(left, right):
-        between = gameplay[max(0, math.floor(left / hop)) : math.ceil(right / hop)]
-        return (
-            0 < right - left <= cfg["dialogue_bridge_s"]
-            and len(between) > 0
-            and between.max() >= cfg["evidence_floor"]
-            and not any(left < cut < right for cut in cuts)
-        )
+    def last_game_beat(left, right):
+        if not 0 < right - left <= cfg["dialogue_bridge_s"] or any(left < cut < right for cut in cuts):
+            return None
+        begin = max(0, math.floor(left / hop))
+        beats = np.flatnonzero(gameplay[begin:math.ceil(right / hop)] >= cfg["evidence_floor"])
+        return (begin + int(beats[-1]) + 1) * hop if beats.size else None
 
     for seg in reversed(nearby):
         ordinary_gap = seg["end"] >= setup - cfg["speech_pause_s"]
-        possible_setup = not _complete(seg["text"]) and continuing_picture(seg["end"], setup)
+        possible_setup = not _complete(seg["text"]) and last_game_beat(seg["end"], setup) is not None
         if seg["start"] < setup and (ordinary_gap or possible_setup):
             if seg["start"] >= earliest or seg["end"] > setup:
-                setup = max(scene_start, seg["start"])
+                setup = max(earliest, seg["start"])
                 bridged |= not ordinary_gap
     # Prefer the nearest pre-event shot boundary in a speech-free gap.
     if not any(s["start"] <= first and s["end"] >= setup for s in nearby):
-        setup = max((t for t in cuts if earliest <= t <= first), default=setup)
+        eligible = (t for t in cuts if max(earliest, setup - cfg["setup_snap_s"]) <= t
+                    <= first - cfg["opening"]["context_lead_s"] and t < first)
+        setup = float(min(eligible, key=lambda t: abs(t - setup), default=setup))
     limit = min(ceiling, setup + cfg["max_s"])
     if limit <= peak:  # a single long ASR segment must not displace the event
         setup = max(scene_start, first - cfg["setup_margin_s"])
@@ -98,22 +105,28 @@ def _timing(segments, first, last, peak, duration, cfg, cuts, gameplay, hop, sce
             limit, end = min(limit, ceiling), min(end, ceiling)
             break
         if seg["start"] > end + cfg["speech_pause_s"]:
-            if (
-                bridged
-                or last_segment is None
-                or _complete(last_segment["text"])
-                or not continuing_picture(last_segment["end"], seg["start"])
-            ):
+            if bridged or last_segment is None or _complete(last_segment["text"]):
+                break
+            anchor = last_game_beat(last_segment["end"], seg["start"])
+            if anchor is None:
                 break
             bridged = True
+            # The gap contains another measured gameplay beat. Budget the continuing
+            # dialogue from that beat, while retaining the shot and observed-payoff ceiling.
+            ceiling = min(scene_ceiling, max(ceiling, anchor + cfg["speech_continuation_s"]))
+            limit = min(ceiling, setup + cfg["max_s"])
         if last_segment and _complete(last_segment["text"]) and seg["start"] > last_segment["end"] + 0.35:
             if any(last_segment["end"] <= cut <= seg["start"] for cut in cuts):
                 break
         if seg["end"] > limit:
-            risk = True
             if end < seg["start"]:
                 break
-            end = limit
+            # Prefer the last completed utterance to a partial sentence at the budget.
+            if last_segment and last_segment["end"] >= last and _complete(last_segment["text"]):
+                end = min(end, seg["start"])
+            else:
+                end = limit
+                risk = True
             break
         end = min(limit, max(end, seg["end"] + cfg["settle_s"]))
         last_segment = seg
@@ -125,19 +138,25 @@ def _timing(segments, first, last, peak, duration, cfg, cuts, gameplay, hop, sce
     # Prefer the gap or word edge on the safe side of the cap.
     for seg in nearby:
         if seg["start"] < end < seg["end"]:
-            for word in tr.words({"segments": [seg]}):
+            risk = True
+            for word in seg.get("words", []):
                 if word["start"] < end < word["end"]:
                     end = word["end"] if word["end"] <= limit else word["start"]
                     risk = True
                     break
         if seg["start"] < setup < seg["end"]:
-            for word in tr.words({"segments": [seg]}):
+            risk = True
+            for word in seg.get("words", []):
                 if word["start"] < setup < word["end"]:
-                    setup = word["start"] if end - word["start"] <= cfg["max_s"] else word["end"]
+                    if word["start"] >= earliest and end - word["start"] <= cfg["max_s"]:
+                        setup = word["start"]
+                    elif word["end"] < first:
+                        setup = word["end"]
                     risk = True
                     break
     risk = risk or bridged or first <= 0 or end >= duration - 0.01 or last > limit
-    return max(scene_start, setup), min(ceiling, end), bool(risk), ceiling
+    risk |= scene_start > 0 and first - scene_start < cfg["opening"]["context_lead_s"]
+    return max(scene_start, setup), min(ceiling, end), bool(risk), ceiling, earliest
 
 
 def _response_pairs(features, scene_id, hop, cfg):
@@ -269,6 +288,7 @@ def propose(features, transcript, duration, hop, cfg, top_k):
     segments = (transcript or {}).get("segments", [])
     narrative = np.zeros(n, np.float32)
     replies = {}
+    story_spans = {}
     for previous, reply in zip(segments, segments[1:]):
         if (
             previous["text"].strip().endswith("?")
@@ -278,6 +298,7 @@ def propose(features, transcript, duration, hop, cfg, top_k):
             reply_i = min(n - 1, int(reply["start"] / hop))
             if scene_id[min(n - 1, int(previous["start"] / hop))] == scene_id[reply_i]:
                 narrative[reply_i] = 1
+                story_spans[reply_i] = (previous["start"], reply["end"])
                 if opening.specific_line(reply["text"]) and not reply["text"].rstrip().endswith("?"):
                     replies[previous["start"]] = (reply["start"], reply["end"], "completed response to question")
     lines = []
@@ -358,8 +379,10 @@ def propose(features, transcript, duration, hop, cfg, top_k):
                 ceiling = min(ceiling, last + cfg["settle_s"])
                 if status == "matched result card":
                     ceiling = min(ceiling, max(read_until, (reaction_end or 0) + cfg["settle_s"]))
-            start, end, risk, ceiling = _timing(segments, first, last, peak, duration, cfg, cuts, g, hop,
-                                                 lower * hop, ceiling)
+            stories = [story_spans[i] for i in part if i in story_spans]
+            story = (stories[0][0], max(s[1] for s in stories)) if stories else None
+            start, end, risk, ceiling, setup_floor = _timing(
+                segments, first, last, peak, duration, cfg, cuts, g, hop, lower * hop, ceiling, story)
             if visible_until is not None and visible_until > end:
                 risk = True
             if part[-1] < group[-1]:
@@ -368,8 +391,6 @@ def propose(features, transcript, duration, hop, cfg, top_k):
                 continue
             scores = {key: round(float(curve[idx]), 4) for key, curve in curves.items()}
             scores["context_completeness"] = 0.0 if risk else 1.0
-            # Keep editorial uncertainty separate from the existing structural score.
-            review_ending = risk or status != "matched result card"
             contributions = {key: value * weights[key] for key, value in scores.items()}
             total = sum(contributions.values())
             outcomes = []
@@ -381,7 +402,8 @@ def propose(features, transcript, duration, hop, cfg, top_k):
                 outcomes.append((response * hop, reaction_end, "corroborated reaction"))
             context = opening.build_context(
                 opening_curves, idle, segments, lines, pictures, start=start, end=end, first=first, peak=peak,
-                scene_start=lower * hop, hop=hop, cfg=cfg, outcomes=outcomes, incomplete=risk)
+                scene_start=lower * hop, hop=hop, cfg=cfg, outcomes=outcomes, incomplete=risk,
+                restore_floor=setup_floor)
             start = opening.select_start(context, end, hop)
             evidence = {}
             for key, curve in {
@@ -411,12 +433,17 @@ def propose(features, transcript, duration, hop, cfg, top_k):
                 moment_type=kind,
                 reason=reason,
                 confidence=confidence,
-                cut_risk=review_ending,
+                cut_risk=risk,
                 payoff_status=status,
                 camera_type=cfg["camera_type"],
                 end_ceiling=ceiling,
                 timing=timing,
                 contributions=contributions,
+                channel_scores={
+                    "gameplay": round(float(g[part].max()), 4),
+                    "streamer_reaction": round(float(max(reaction[part].max(), reaction[response])), 4),
+                    "narrative": float(narrative[part].max()),
+                },
                 highlight_quality=round(total, 4),
                 opening_context=context,
                 evidence=evidence,

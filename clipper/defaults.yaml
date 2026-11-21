@@ -95,6 +95,9 @@ stream_highlights:
   max_event_s: 24
   setup_margin_s: 2.5
   max_setup_s: 26
+  speech_setup_s: 10          # incidental commentary before the first measured event
+  speech_continuation_s: 14   # incidental speech after the last reaction, event or observed result
+  setup_snap_s: 2             # how far before the normal opening a soft histogram cue may pull it
   settle_s: 1.0
   dialogue_bridge_s: 11       # one unresolved speech gap with continuing game activity and no shot cut
   speech_pause_s: 1.6

@@ -182,6 +182,7 @@ def test_review_changes_rank_and_reanalysis_retains_manual_opening(source, cfg):
         assert [c["id"] for c in ranked] == [weak_id, strong_id]
         assert ranked[1]["flags"]["opening_window"] == [42, 45]
         assert ranked[1]["flags"]["weak_opening"] and ranked[1]["hook"] == "Edited caption"
+        assert ranked[1]["flags"]["channel_scores"]["opening"] == ranked[1]["flags"]["hook_strength_score"]
         db.replace_candidates(conn, sid, rows, mode="stream_highlights")
 
 
@@ -204,6 +205,8 @@ def test_streamlit_shows_evidence_and_rescores_unsaved_opening(source, cfg):
     assert not app.exception
     assert any("Opening strength" in item.value and "Highlight quality" in item.value for item in app.markdown)
     assert any("visual activity" in item.value for item in app.caption)
+    assert any("gameplay" in item.value and "streamer reaction" in item.value and "narrative" in item.value
+               for item in app.caption)
     app.number_input(key=f"start_{cid}").set_value(13.).run()
     assert any("Weak opening" in item.value for item in app.warning)
     app.button(key=f"save_{cid}").click().run()

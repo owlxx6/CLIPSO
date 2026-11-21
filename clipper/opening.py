@@ -68,12 +68,12 @@ def measurements(features, hop, cfg, sync, response_lag):
 
 
 def build_context(curves, idle, segments, lines, pictures, *, start, end, first, peak, scene_start, hop, cfg,
-                  outcomes, incomplete):
+                  outcomes, incomplete, restore_floor=None):
     """Retain a small, candidate-local set of observations for review and platform-specific starts."""
     settings = cfg["opening"]
     # Restore a sentence that straddles the original cut when its complete beginning fits.
     earliest = min([start] + [s["start"] for s in segments if s["start"] < start < s["end"]])
-    if earliest < scene_start or end - earliest > cfg["max_s"]:
+    if earliest < (scene_start if restore_floor is None else restore_floor) or end - earliest > cfg["max_s"]:
         earliest = start
     protected_start = max(earliest, min(first - settings["context_lead_s"], peak))
     # Every discarded sample must have positive evidence of silence and a stable picture.
@@ -173,6 +173,8 @@ def scored_flags(flags, start, end):
     """Recompute a proposed, reviewed or exported cut using the measurements from its analysis run."""
     context = flags["opening_context"]
     result = evaluate(context, start, end)
+    if "channel_scores" in flags:
+        result["channel_scores"] = dict(flags["channel_scores"], opening=result["hook_strength_score"])
     bonus = 0.0
     if context["incomplete"] or end < context["protected_end"]:
         result["opening_bonus_note"] = "The event or payoff boundary needs review."

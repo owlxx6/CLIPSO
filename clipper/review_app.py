@@ -5,6 +5,8 @@ Start it with `clipper review`. Labels are what `clipper eval` and `clipper tune
 
 from __future__ import annotations
 
+import json
+
 import streamlit as st
 
 from clipper import config, db, evaluate, media, opening, pipeline, stream_highlights, layout
@@ -38,6 +40,14 @@ labels = db.list_labels(conn, src["id"])
 show = st.sidebar.radio("Show", ["all", "not reviewed", "good", "bad"])
 platforms = st.sidebar.multiselect("Platforms to render", list(cfg["platforms"]), default=list(cfg["platforms"]))
 st.sidebar.caption(f"Rights: {src['rights']}")
+
+if mode == stream_highlights.MODE:
+    diagnostics = pipeline.workdir(cfg, src["id"]) / "stream_channels.json"
+    if diagnostics.is_file():
+        channels = json.loads(diagnostics.read_text(encoding="utf-8"))
+        st.sidebar.caption("Active channels: " + (", ".join(k.replace("_", " ") for k,v in channels.items() if v) or "none"))
+        if not channels["transcript"]:
+            st.sidebar.warning("No usable transcript for this analysis. Speech timing and narrative evidence are unavailable.")
 
 if not cands:
     st.warning("No candidates in this mode. Analyze this recording or change the mode.")
@@ -74,7 +84,7 @@ for c in cands[:top_n]:
                     quality_parts = {k: v for k, v in flags.get("contributions", {}).items() if k != "opening_bonus"}
                     st.json({"measurements": c["signals"], "highlight_quality_components": quality_parts,
                              "observations": flags["evidence"]})
-                if flags["cut_risk"]:
+                if flags.get("opening_context", {}).get("incomplete", flags["cut_risk"]):
                     st.warning("The ending or setup is uncertain. Check the surrounding footage.")
                 start = st.number_input("Start (seconds)", min_value=0., max_value=float(src["duration"]),
                                         value=float(start), step=0.25, key=f"start_{c['id']}")
@@ -82,6 +92,10 @@ for c in cands[:top_n]:
                                       value=float(end), step=0.25, key=f"end_{c['id']}")
                 if "opening_context" in flags and start < end:
                     current = opening.scored_flags(flags, start, end)
+                    if "channel_scores" in current:
+                        st.caption("Event evidence · " + " · ".join(
+                            f"{name.replace('_', ' ')} {value:.2f}" for name, value in current["channel_scores"].items()
+                            if name != "opening"))
                     st.write(f"Highlight quality {current['highlight_quality']:.2f} · "
                              f"Opening strength {current['hook_strength_score']:.2f}/1 · "
                              f"Ranking bonus +{current['opening_bonus']:.2f}")

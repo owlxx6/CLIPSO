@@ -23,7 +23,8 @@ class Variant:
     cover_at: float
 
 
-def _edge_options(anchor, other, peak, duration, min_s, max_s, radius, before, segments, words, cues):
+def _edge_options(anchor, other, peak, duration, min_s, max_s, radius, before, segments, words, cues,
+                  allow_peak_start=False):
     direction = -1 if before else 1
     # Include the positions needed to meet a narrower/wider campaign duration.
     anchors = {anchor, other + direction * min_s, other + direction * max_s,
@@ -39,13 +40,90 @@ def _edge_options(anchor, other, peak, duration, min_s, max_s, radius, before, s
     for t in sorted(anchors | grid | sentences | cues | word_edges):
         if not 0 <= t <= duration or any(s < t < e for s, e in nearby_words):
             continue
-        if before and t >= peak or not before and t <= peak:
+        if before and (t > peak or t == peak and not allow_peak_start) or not before and t <= peak:
             continue
         penalty = 0 if t in sentences else 0.25 if t in cues else 0.75 if t in word_edges else 1.5
         # Removing setup/payoff costs more than including a little additional context.
         loss = max(0, (anchor - t) * direction)
         options.append((t, penalty + abs(t - anchor) * 0.35 + loss))
     return options
+
+
+def _styled_variant(cand_id, platform, start, end, pcfg):
+    rng = random.Random(f"{cand_id}:{platform}")
+    return Variant(platform, start, end, float(rng.choice(pcfg.get("zoom_choices", [1.0]))),
+                   str(pcfg.get("highlight_color", "#FFE500")), round(rng.uniform(0.6, 1.6), 2))
+
+
+def _protected_plans(cand_id, start, end, peak, duration, platforms, cfg, used, segments, words, cues,
+                     limits, scene_start, end_ceiling, reserved, replacing):
+    """Find a joint assignment of outward-only cuts. A tight platform may need the exact review bounds."""
+    separation = float(cfg["variants"]["min_cut_distance_s"])
+    reuse = float(cfg["variants"]["reuse_tolerance_s"])
+    floor = min(start, scene_start) if scene_start is not None else 0.
+    ceiling = max(end, end_ceiling) if end_ceiling is not None else duration
+    available = {}
+    for platform in platforms:
+        pcfg = cfg["platforms"][platform]
+        minimum = min(duration, cfg["stream_highlights"]["min_s"])
+        maximum = min(cfg["stream_highlights"]["max_s"], pcfg.get("max_s", duration))
+        if limits:
+            minimum, maximum = max(minimum, limits[0]), min(maximum, limits[1])
+        if end - start > maximum + 1e-8:
+            raise ValueError(f"{platform}: reviewed interval {start:g}–{end:g} is {end-start:g}s; "
+                             f"effective maximum is {maximum:g}s.")
+        if min(ceiling-floor, maximum) < minimum - 1e-8:
+            raise ValueError(f"{platform}: requires at least {minimum:g}s; only "
+                             f"{min(ceiling-floor, maximum):g}s fit inside the scene and duration limits.")
+        radius = max(pcfg.get("trim_jitter_s", 1.2), cfg["detection"]["snap_search_s"])
+
+        def edges(before):
+            anchor, other = (start, end) if before else (end, start)
+            choices = _edge_options(anchor, other, peak, duration, minimum, maximum, radius,
+                                    before, segments, words, cues, allow_peak_start=True)
+            if before:
+                return [(t, cost) for t, cost in choices if floor <= t <= start
+                        and (scene_start is None or t == start or not any(a < t < b for a,b in segments))]
+            return [(t, cost) for t, cost in choices if end <= t <= ceiling]
+
+        starts, ends = edges(True), edges(False)
+        fits = [(start - s + e - end, sc + ec, s, e) for s, sc in starts for e, ec in ends
+                if minimum - 1e-8 <= e - s <= maximum + 1e-8]
+        if not fits:
+            raise ValueError(f"{platform}: no word-safe outward cut can contain {start:g}–{end:g}s "
+                             f"inside {floor:g}–{ceiling:g}s with duration {minimum:g}–{maximum:g}s.")
+        choices = [(s, e) for _, _, s, e in sorted(fits)
+                   if not any(abs(s-a) < reuse and abs(e-b) < reuse for a, b in used.get(platform, ()))]
+        if not choices:
+            raise ValueError(f"{platform}: every feasible cut containing {start:g}–{end:g}s "
+                             "reuses bounds reserved by another export.")
+        available[platform] = choices
+
+    order = sorted(platforms, key=lambda p: len(available[p]))
+    chosen = {}
+
+    def assign(remaining):
+        if not remaining:
+            return True
+        # A previous sibling is still live until its replacement succeeds. Try moving
+        # it first if it occupies the only feasible cut for a tighter platform.
+        for platform in remaining if replacing else remaining[:1]:
+            later = [p for p in remaining if p != platform]
+            live = [*reserved, *chosen.values(), *(cut for p in later for cut in replacing.get(p, ()))]
+            for s, e in available[platform]:
+                if any(abs(s-a) < separation or abs(e-b) < separation for a, b in live):
+                    continue
+                chosen[platform] = (s, e)
+                if assign(later):
+                    return True
+                del chosen[platform]
+        return False
+
+    if not assign(order):
+        raise ValueError(f"{', '.join(platforms)}: distinct-cut spacing of {separation:g}s at both edges "
+                         f"cannot preserve {start:g}–{end:g}s within {floor:g}–{ceiling:g}s "
+                         "and the retained platform edits.")
+    return [_styled_variant(cand_id, p, *chosen[p], cfg["platforms"][p]) for p in (chosen if replacing else platforms)]
 
 
 def plan_variants(
@@ -60,6 +138,8 @@ def plan_variants(
     *, transcript: dict | None = None, cues: list[float] | None = None,
     duration_limits: tuple[float, float] | None = None, protected: bool = False, end_ceiling: float | None = None,
     scene_start: float | None = None,
+    reserved: tuple[tuple[float, float], ...] = (),
+    replacing_cuts: dict[str, list[tuple[float, float]]] | None = None,
 ) -> list[Variant]:
     used_cuts = used_cuts or {}
     min_dist = float(cfg["variants"]["min_cut_distance_s"])
@@ -68,25 +148,19 @@ def plan_variants(
     segments = tr.segments(transcript)
     words = [(w["start"], w["end"]) for w in tr.words(transcript)]
     cues = cues or []
+    if protected:
+        return _protected_plans(cand_id, start, end, peak, duration, platforms, cfg, used_cuts, segments, words,
+                                cues, duration_limits, scene_start, end_ceiling, reserved, replacing_cuts or {})
     for platform in platforms:
         pcfg = cfg["platforms"][platform]
         target = cfg["targets"][pcfg.get("target", "campaign")]
         min_s, max_s = float(target["min_s"]), float(pcfg.get("max_s", target["max_s"]))
-        if protected:
-            min_s = min(duration, float(cfg["stream_highlights"]["min_s"]))
-            max_s = min(float(cfg["stream_highlights"]["max_s"]), float(pcfg.get("max_s", duration)))
         if duration_limits:
             min_s = max(min_s, duration_limits[0])
             max_s = min(max_s, duration_limits[1])
-        rng = random.Random(f"{cand_id}:{platform}")
         radius = max(float(pcfg.get("trim_jitter_s", 1.2)), float(cfg["detection"]["snap_search_s"]))
         starts = _edge_options(start, end, peak, duration, min_s, max_s, radius, True, segments, words, cues)
-        if protected and scene_start is not None:
-            starts = [(t, cost) for t, cost in starts if t >= min(start, scene_start)
-                      and (t == start or not any(a < t < b for a, b in segments))]
         ends = _edge_options(end, start, peak, duration, min_s, max_s, radius, False, segments, words, cues)
-        if protected and end_ceiling is not None:
-            ends = [(t, cost) for t, cost in ends if t <= max(end, end_ceiling)]
         pre = min(peak - start, float(cfg["detection"]["pre_roll_s"]), max_s * 0.5)
         post = min(end - peak, float(cfg["detection"]["post_roll_s"]), max_s * 0.3)
         best = None
@@ -95,8 +169,6 @@ def plan_variants(
             if s > peak - pre or any(abs(s - v.start) < min_dist for v in out):
                 continue
             for e, end_cost in ends:
-                if protected and (s > start or e < end):
-                    continue
                 if e < peak + post or not min_s <= e - s <= max_s:
                     continue
                 if any(abs(e - v.end) < min_dist for v in out):
@@ -104,21 +176,9 @@ def plan_variants(
                 if any(abs(s - us) < reuse_tol and abs(e - ue) < reuse_tol for us, ue in used_cuts.get(platform, [])):
                     continue
                 rank = (start_cost + end_cost, abs(s - start) + abs(e - end), s, e)
-                if protected:
-                    rank = (start - s + e - end, *rank)
                 if best is None or rank < best:
                     best, chosen = rank, (s, e)
         if chosen is None:
-            if protected:
-                raise ValueError(f"No {platform} cut fits the reviewed interval, duration limits and distinct-cut "
-                                 "rules. Review the bounds or render fewer platforms.")
             raise RuntimeError(f"could not plan distinct cuts for candidate {cand_id} on {platform}")
-        out.append(Variant(
-            platform=platform,
-            start=chosen[0],
-            end=chosen[1],
-            zoom=float(rng.choice(pcfg.get("zoom_choices", [1.0]))),
-            highlight_color=str(pcfg.get("highlight_color", "#FFE500")),
-            cover_at=round(rng.uniform(0.6, 1.6), 2),
-        ))
+        out.append(_styled_variant(cand_id, platform, *chosen, pcfg))
     return out

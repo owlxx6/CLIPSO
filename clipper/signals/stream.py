@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import re
 
 import cv2
 import numpy as np
@@ -117,7 +118,19 @@ def audio_features(db, transcript, duration, hop, cfg, keywords, pitch=None):
     laughter = np.zeros(n, dtype=np.float32)
     timed_words = {w["start"]: w["end"] for seg in (transcript or {}).get("segments", [])
                    for w in seg.get("words", [])}
-    for t, _ in tr.keyword_hits(words, keywords["laughter"]):
+    markers = keywords["laughter"]
+    times = {t for t, _ in tr.keyword_hits(words, markers)}
+    # Match the configured laughter families as whole ASR tokens, including elongated spellings.
+    families = {"haha": r"a?h+a+(?:h+a+)+h*|(?:ah+){2,}a?", "mdr": r"m+d+r+", "ptdr": r"p+t+d+r+"}
+    patterns = [pattern for marker, pattern in families.items() if marker in markers]
+    if patterns:
+        laugh = re.compile("|".join(patterns))
+        for w in words:
+            tokens = tr.normalize(w["word"]).split()
+            repeated_ha = "haha" in markers and len(tokens) >= 2 and all(t in {"ha", "ah"} for t in tokens)
+            if repeated_ha or any(laugh.fullmatch(token) for token in tokens):
+                times.add(w["start"])
+    for t in times:
         i = min(n - 1, max(0, int(t / hop)))
         # A word with observed timestamps can remain present across a plateau.
         laughter[i:max(i + 1, math.ceil(timed_words.get(t, t) / hop))] = 1
@@ -162,6 +175,10 @@ def _track_face(roi, finder, previous):
     return box, float(quality)
 
 
+def measures_gameplay(camera, facecam):
+    return camera != "screen_reaction" and (camera not in {"avatar", "full_body"} or facecam is not None)
+
+
 def visual_features(source: dict, facecam: dict | None, duration: float, hop: float, cfg: dict,
                     reference=None) -> dict:
     """Stream downsized grayscale samples. Exclude the whole camera overlay from gameplay measurements."""
@@ -181,7 +198,7 @@ def visual_features(source: dict, facecam: dict | None, duration: float, hop: fl
         mask[roi] = False
         if camera == "webcam":
             finder = layout.FaceFinder()
-    measure_game = camera != "screen_reaction" and (camera not in {"avatar", "full_body"} or facecam is not None)
+    measure_game = measures_gameplay(camera, facecam)
     if reference is not None and measure_game:
         x, y, w, h = cfg["result_card"]["roi"]
         card_roi = np.s_[int(y*height):math.ceil((y+h)*height), int(x*width):math.ceil((x+w)*width)]

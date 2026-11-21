@@ -61,6 +61,16 @@ The detector searches around observed activity and protects complete spoken word
 
 The YAML keys and defaults are in [defaults.yaml](../clipper/defaults.yaml). Use `analysis.mode: stream_highlights` to make this ranking the local default. Adjust `stream_highlights.min_s`, `max_s`, `speech_pause_s`, `dialogue_bridge_s`, `sync_s` and `min_score` in a local or streamer config. Expensive stream measurements are cached using the recording digest, sampling parameters and camera ROI. Changing scoring weights reuses the measurements. The two rankings share time-based labels and retain their own candidates and edited hooks. V1 uses the existing SQLite schema. Classic `tune` continues to tune the classic detector.
 
+## Boundary and export review
+
+The normal setup begins 2.5 seconds before the first event. A soft histogram change can move it to a nearby pre-event shot boundary. An impact flash at onset cannot erase that approach, and an isolated change much earlier cannot draw it back. `setup_snap_s` limits the extra lead. A confirmed scene cut still bounds the search. If there is too little setup in that shot, the proposal requests a boundary review.
+
+Incidental speech can contribute up to `speech_setup_s` (10 seconds) before the event and `speech_continuation_s` (14 seconds) after the last supported beat. Separate clocks allow an observed reaction, continuing action, timed question and completed reply, or visible result to carry a longer sequence. A very long ASR segment can still end mid-sentence. The review flags that structural risk. An unconfirmed visual payoff appears as a separate observation.
+
+Streamlit shows the active analysis channels even when the detector abstains. Missing usable transcription disables lexical and narrative evidence. New Whisper caches retain available language, segment and word confidence. Older caches can lack these fields. Mixed audio and tracked movement are evidence of possible reactions. They cannot identify a speaker or confirm an emotion.
+
+On render, each requested platform must contain the entire reviewed interval. The planner considers the platforms together and can extend outward at word-safe edges. A narrow platform can keep the exact edit while another uses a longer cut. Re-rendering can reuse the candidate's own unposted cut. Retained sibling versions, posted files, rights, disclosure and duplicate rules still apply. The UI identifies the conflicting platform and duration, word boundary, reserved edit or required edge spacing when it cannot produce a valid plan.
+
 ## First-seconds opening strength
 
 Stream Highlights first admits a candidate using its existing event signals. Its seven weighted components give `highlight_quality`. The ranking can then receive a modest positive bonus from a separate `hook_strength_score` between 0 and 1. The scorer sees the first three seconds of the proposed cut by default. It records source times and offsets from the actual clip start. Generated hooks, edited captions and raw loudness contribute zero.
@@ -72,7 +82,7 @@ Stream Highlights first admits a candidate using its existing event signals. Its
 | Quiet image or result graphic | A sustained new image or a matched local result template visible for at least one second of the opening. The cue describes a source image. Check legibility in the chosen vertical crop. |
 | Spoken line or anticipation | A complete, specific French or English question or imperative fits inside the opening. It coincides with measured action, or a later completed response, measured event or visible result falls within the kept clip. The evidence includes the spoken text and the supporting time when applicable. |
 
-Cue strength decreases with its delay inside the window. Only the strongest supported cue determines the score, so several correlated channels cannot inflate it. By default a score below 0.55 sets `weak_opening` and earns zero bonus. Otherwise the bonus is at most `0.18 × hook_strength_score`, limited to 10% of highlight quality. A structurally incomplete candidate or an edit that drops the protected ending gets zero bonus. The payoff-review warning remains independently visible when the meaning of the ending is uncertain.
+Cue strength decreases with its delay inside the window. Only the strongest supported cue determines the score, so several correlated channels cannot inflate it. By default a score below 0.55 sets `weak_opening` and earns zero bonus. Otherwise the bonus is at most `0.18 × hook_strength_score`, limited to 10% of highlight quality. A structurally incomplete candidate or an edit that drops the protected ending gets zero bonus. The review also displays the observed payoff status.
 
 The start search retains the original event, reaction and end. It compares alternatives within the same scene, trimming only measured quiet, visually stable lead-in before the first protected cue. Speech, audible or unmeasured intervals, known graphics and visually active setup constrain the search. It preserves an establishing beat and the minimum duration. Equal scores retain more context. If the original cut straddles a timed utterance, its start can be restored when the full sentence fits. These are conservative timing heuristics. The editor still decides whether the opening tells the story faithfully.
 
@@ -101,7 +111,7 @@ The observations motivated timing and review rules. The seven score weights have
 | Quiet visual results | Experimental. A change outside the camera and result regions followed by a persistent new picture can extend an existing event through a quiet pause. Review shows the first change and how long it held. A changed image can be an unrelated camera movement. |
 | Known on-screen text | Optional, experimental. Match an editor-supplied result graphic in a fixed region with OpenCV. Require repeated actual samples over `hold_s`. An always-present HUD, an isolated flash or a matching card without an underlying event cannot seed a clip from that region. A matched result can arrive on a shot cut. |
 | Unrelated endings | Implemented. Persistent histogram changes bound the scene. The return from a single sampled flash is ignored. A pause after a completed utterance can separate the next conversation. The platform planner respects the detected end ceiling. If multiple distinct cuts cannot fit, render fewer platforms or explicitly review the bounds. |
-| Payoff and review | Implemented. Inspect the event, measured response, first payoff cue, its sampled interval and the proposed end. A quiet picture, missing cue, or display continuing beyond the reading allowance requests human review. Manually extending an end past an automatic ceiling authorizes the reviewed interval. |
+| Payoff and review | Implemented. Inspect the event, measured response, first payoff cue, its sampled interval and the proposed end. A display continuing past the ending raises a cut warning. A missing cue is shown as unconfirmed. Manually extending an end past an automatic ceiling authorizes the reviewed interval. |
 | Semantic interpretation | Deferred. Automatic OCR of arbitrary usernames, subtitles and changing HUD text, camera-type classification, smiles, laughter without timed or acoustic evidence, topic recognition and respawn identification require independent evidence. |
 
 ### Configure an optional result message
@@ -119,6 +129,23 @@ stream_highlights:
 Paths are relative to `CLIPPER_HOME` or absolute. The default configuration leaves the template disabled. The scan uses existing downscaled frames, masks this region from gameplay novelty and adds no OCR engine or model. Edits to the template, region, camera type or scan settings invalidate the cached visual measurements. In a transparent, animated or repositioned HUD the template can miss appearances. A match reports the operator's graphic only and never generates a hook from its contents.
 
 Visual times have sampling precision (default 2 fps). The reported interval for a result card ends at the first missed sample or the end of the recording. A held picture gets up to `read_s` (4 s) of automatic reading time. A short matched card can finish at its observed disappearance within one additional settling interval. If a corroborated response continues later in the same scene, the boundary also protects that response. A long card is flagged so the editor can extend the preview or cut earlier.
+
+### Frozen-label benchmark
+
+Before viewing predictions, have an independent editor label event intervals on authorized footage. Mark the intended setup and ending as accurately as possible. Freeze those source-time labels once and reuse the file for every comparison. From a Git checkout containing both revisions, run:
+
+```powershell
+python -m clipper.stream_benchmark freeze 1 labels.json
+python -m clipper.stream_benchmark compare 1 labels.json --baseline 791188c --corrected HEAD --k 10 --output comparison.json
+```
+
+The three runs use classic at the audited revision, Stream Highlights at that revision, and Stream Highlights at the corrected commit. Each starts in a fresh temporary library with the same recording, effective settings, layout and available input sidecars. Git archives provide the committed code. The comparison uses local CPU analysis with ASR generation disabled. The report records both commit IDs, recording and manifest digests, configuration and input fingerprints, ranked intervals, matches to positive labels, negative overlaps and signed start/end errors in seconds. A positive start error means lost lead-in. A positive end error means an overrun. An unmatched proposal can be unlabeled. Keep the local report with the labels and use a new output file for each run.
+
+**Interpreting the four scores.** Gameplay and streamer reaction are the strongest measured activity within the event (including a linked response). Narrative reports a bounded question/reply cue. Opening measures the actual first seconds of the proposed or edited cut. These 0–1 evidence scores are available in review and new export receipts. They share inputs and have no probability interpretation.
+
+Silent gameplay has a structural disadvantage. Its standalone seed multiplies gameplay activity by novelty, and their maximum pre-context weighted contribution is 1.35 against a default 1.1 admission threshold. A paired event can also receive up to 3.2 points for synchronization. Motion novelty already contributes to gameplay activity, and synchronization reuses both gameplay and response evidence. Several contributions can therefore reflect the same observation. No weights were fitted in the audit. Compare retrieval, boundary errors and blinded editorial judgments separately for silent and reaction-led footage before considering calibration.
+
+On the existing private 15-minute recording, the frozen manifest contained two positive intervals and two negatives. Classic produced 18 candidates and retrieved the positives at ranks 2 and 4. Audited Stream Highlights (`791188c`) produced 33 candidates and the correction (`33afef1`) produced 40. Both Stream rankings retrieved the positives at ranks 6 and 10 with identical bounds on those two proposals. Their median top-ten duration changed from 22.45 to 20.78 seconds. These four historical labels exercise the workflow. Independent, blinded boundary and quality labels are still needed to evaluate the additional candidates.
 
 ### Evaluation plan
 

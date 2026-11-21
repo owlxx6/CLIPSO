@@ -252,7 +252,7 @@ Run `clipper analyze SOURCE --mode stream_highlights` to rank gameplay changes a
 
 In `clipper review` choose **Stream Highlights**, inspect the time-stamped evidence and uncertainty, preview a vertical layout, and save the bounds and hook before exporting. A blank hook is supported. Use `clipper render SOURCE --mode stream_highlights --top 1 --platforms tiktok --layout stacked` for a local vertical file. The existing campaign and duplicate checks apply.
 
-The [Stream Highlights guide and benchmark](docs/STREAM_HIGHLIGHTS.md) contains the PowerShell walkthrough, supported configuration, comparison on a 15-minute recording, sources and limitations.
+To compare classic, audited and corrected Stream Highlights rankings on the same human labels, run the optional local [frozen-label benchmark](docs/STREAM_HIGHLIGHTS.md#frozen-label-benchmark). The [Stream Highlights guide](docs/STREAM_HIGHLIGHTS.md) includes the Windows walkthrough, timing settings and initial 15-minute recording results.
 
 For a recording with a real webcam, run `clipper layout SOURCE --camera-type webcam` before analysis. Other choices include gameplay only, a full-body camera, screen reactions and avatars. Review now shows delayed and sustained reaction evidence, held-image or known result-card timing, and uncertain endings. A local image of a result message can serve as an optional template.
 

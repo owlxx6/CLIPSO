@@ -135,6 +135,13 @@ def test_platform_error_identifies_duration_and_reviewed_interval(cfg):
         variants.plan_variants(1, 10, 22, 17, 100, ["instagram"], cfg, protected=True)
 
 
+def test_three_platforms_fit_exact_fractional_edge_spacing(cfg):
+    plans = variants.plan_variants(1, 100., 121., 116.5, 3600., ["tiktok", "instagram", "youtube"], cfg,
+                                   protected=True, scene_start=99.2, end_ceiling=121.8)
+    assert sorted(p.start for p in plans) == pytest.approx([99.2, 99.6, 100.])
+    assert sorted(p.end for p in plans) == pytest.approx([121., 121.4, 121.8])
+
+
 def test_joint_replacement_moves_sibling_before_reusing_its_old_bounds(cfg):
     cfg["platforms"]["instagram"]["max_s"] = 12
     plans = variants.plan_variants(1, 10, 22, 17, 100, ["instagram", "tiktok"], cfg, protected=True,

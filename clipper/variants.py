@@ -24,20 +24,21 @@ class Variant:
 
 
 def _edge_options(anchor, other, peak, duration, min_s, max_s, radius, before, segments, words, cues,
-                  allow_peak_start=False):
+                  allow_peak_start=False, exact_edges=()):
     direction = -1 if before else 1
     # Include the positions needed to meet a narrower/wider campaign duration.
     anchors = {anchor, other + direction * min_s, other + direction * max_s,
                peak + direction * min_s / 2, peak + direction * max_s / 2}
     anchors = {max(0.0, min(duration, t)) for t in anchors}
     grid = {round(t + i * 0.25, 3) for t in anchors for i in range(-int(radius * 4), int(radius * 4) + 1)}
-    near = lambda t: any(abs(t - a) <= radius for a in anchors)
+    centers = anchors.union(exact_edges)
+    near = lambda t: any(abs(t - a) <= radius for a in centers)
     sentences = {s if before else e for s, e in segments if near(s if before else e)}
-    nearby_words = [(s, e) for s, e in words if any(s - radius <= a <= e + radius for a in anchors)]
+    nearby_words = [(s, e) for s, e in words if any(s - radius <= a <= e + radius for a in centers)]
     word_edges = {s if before else e for s, e in nearby_words if near(s if before else e)}
     cues = {t for t in cues if near(t)}
     options = []
-    for t in sorted(anchors | grid | sentences | cues | word_edges):
+    for t in sorted(centers | grid | sentences | cues | word_edges):
         if not 0 <= t <= duration or any(s < t < e for s, e in nearby_words):
             continue
         if before and (t > peak or t == peak and not allow_peak_start) or not before and t <= peak:
@@ -53,6 +54,11 @@ def _styled_variant(cand_id, platform, start, end, pcfg):
     rng = random.Random(f"{cand_id}:{platform}")
     return Variant(platform, start, end, float(rng.choice(pcfg.get("zoom_choices", [1.0]))),
                    str(pcfg.get("highlight_color", "#FFE500")), round(rng.uniform(0.6, 1.6), 2))
+
+
+def cuts_conflict(start, end, other_start, other_end, distance):
+    # Source timestamps are floats. Two edges exactly 0.4s apart may subtract to 0.39999999999999.
+    return min(abs(start - other_start), abs(end - other_end)) + 1e-8 < distance
 
 
 def _protected_plans(cand_id, start, end, peak, duration, platforms, cfg, used, segments, words, cues,
@@ -79,8 +85,14 @@ def _protected_plans(cand_id, start, end, peak, duration, platforms, cfg, used, 
 
         def edges(before):
             anchor, other = (start, end) if before else (end, start)
+            lo, hi = (floor, start) if before else (end, ceiling)
+            # The search grid alone can miss an exact fit (e.g. three edges 0.4 s apart).
+            live = [*reserved, *(cut for cuts in replacing.values() for cut in cuts)]
+            anchors = {lo, hi, *(s if before else e for s, e in live)}
+            exact = {min(hi, max(lo, t + step * separation)) for t in anchors
+                     for step in range(-len(platforms), len(platforms) + 1)}
             choices = _edge_options(anchor, other, peak, duration, minimum, maximum, radius,
-                                    before, segments, words, cues, allow_peak_start=True)
+                                    before, segments, words, cues, allow_peak_start=True, exact_edges=exact)
             if before:
                 return [(t, cost) for t, cost in choices if floor <= t <= start
                         and (scene_start is None or t == start or not any(a < t < b for a,b in segments))]
@@ -111,7 +123,7 @@ def _protected_plans(cand_id, start, end, peak, duration, platforms, cfg, used, 
             later = [p for p in remaining if p != platform]
             live = [*reserved, *chosen.values(), *(cut for p in later for cut in replacing.get(p, ()))]
             for s, e in available[platform]:
-                if any(abs(s-a) < separation or abs(e-b) < separation for a, b in live):
+                if any(cuts_conflict(s, e, a, b, separation) for a, b in live):
                     continue
                 chosen[platform] = (s, e)
                 if assign(later):

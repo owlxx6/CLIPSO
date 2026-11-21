@@ -404,10 +404,8 @@ def _publish(conn, staged: Path, directory: Path, previous: list[dict], replaced
                 raise RuntimeError("Exports changed during rendering. Retry with current export records.")
             if cut_distance is not None:
                 for sibling in db.list_exports(conn, candidate_id=fields["candidate_id"]):
-                    if sibling["platform"] != fields["platform"] and (
-                        abs(fields["start_s"] - sibling["start_s"]) < cut_distance
-                        or abs(fields["end_s"] - sibling["end_s"]) < cut_distance
-                    ):
+                    if sibling["platform"] != fields["platform"] and variants.cuts_conflict(
+                            fields["start_s"], fields["end_s"], sibling["start_s"], sibling["end_s"], cut_distance):
                         raise RuntimeError(f"{fields['platform']} conflicts with retained {sibling['platform']} "
                                            f"export #{sibling['id']}. Both cut edges need {cut_distance:g}s spacing.")
             n = 1

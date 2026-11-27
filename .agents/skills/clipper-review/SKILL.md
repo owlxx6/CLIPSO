@@ -5,7 +5,7 @@ description: Review a CLIPSO branch or working-tree diff for regressions in tran
 
 # Review a CLIPSO change
 
-Establish the comparison branch and inspect both its diff and pending local work. Read `AGENTS.md`, the affected entry points and their tests. Trace a behavior through both the CLI and the Streamlit app when they share the pipeline.
+Establish the comparison branch and inspect both its diff and pending local work. Read the affected entry points and their tests. Trace a behavior through both the CLI and the Streamlit app when they share the pipeline.
 
 - **Speech and hooks.** Distinguish imported, generated and legacy transcripts. Try changed Whisper settings with the same media, a changed source, disabled transcription and a forced rerun. Check the actual caption events or a rendered frame. Examine how manual edits, cleared hooks, and unknown legacy hook origins survive reanalysis.
 - **Rights and exports.** Follow the effective rights and disclosure decisions through subtitles and JSON. For replacement, follow the old file, sidecars, database row and posted guard across encoder failure, publication and cleanup. Check per-platform duplicate evidence and how decode errors surface.

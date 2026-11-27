@@ -276,7 +276,6 @@ pytest -q                 # everything (about 2 minutes: it builds small test vi
 pytest -q -m "not slow"   # the fast part
 ```
 
-Coding agents: read [AGENTS.md](AGENTS.md). Work in progress and next steps: [TASKS.md](TASKS.md).
 
 ## Credits
 

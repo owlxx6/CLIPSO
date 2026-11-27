@@ -5,7 +5,7 @@ description: Verify a CLIPSO change on the offline synthetic stream with pytest,
 
 # Verify a CLIPSO checkout
 
-Work from the checkout being tested. Read `AGENTS.md` and record the branch, revision and any uncommitted changes. Use a Python environment that can import the project and run pytest. When FFmpeg is installed outside PATH, set `CLIPPER_FFMPEG_DIR` to the directory containing both executables.
+Work from the checkout being tested. Record the branch, revision and any uncommitted changes. Use a Python environment that can import the project and run pytest. When FFmpeg is installed outside PATH, set `CLIPPER_FFMPEG_DIR` to the directory containing both executables.
 
 1. Choose a fresh scratch directory. Point `CLIPPER_HOME` and `CLIPPER_DATA_DIR` there and clear unrelated `CLIPPER_CONFIG` overrides. A reused demo database can trigger the duplicate guard on a second run.
 2. Run `python -m pytest -q -ra` and `python -m clipper doctor`. Report failures and skips separately, including optional Streamlit or face-fixture coverage. Record the FFmpeg build, encoder and Python version used.

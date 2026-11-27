@@ -14,6 +14,7 @@ from clipper import __version__, campaign, config, db, evaluate, fixture, media,
 from clipper import layout as layout_mod
 from clipper.config import FONTS_DIR
 from clipper.signals import transcript as tr
+from clipper.signals.stream import CAMERA_TYPES
 
 PLATFORMS_DEFAULT = "tiktok,instagram,youtube"
 
@@ -39,8 +40,9 @@ def _print_candidates(rows: list[dict], labels: list[dict], top: int) -> None:
         lab_txt = {1: "good", 0: "bad"}.get(lab, "")
         flag = " [check spoiler]" if (r.get("flags") or {}).get("spoiler_review") else ""
         hook = (r.get("hook") or "")[:40]
-        print(f"{r['id']:>5} {r['rank']:>4}  {media.fmt_ts(r['start_s']):>10}  {media.fmt_ts(r['end_s']):>10} "
-              f"{r['end_s'] - r['start_s']:>5.1f} {r['score']:>6.2f}  {lab_txt:>5}  {sig_txt}{flag}  {hook}")
+        start, end = (r.get("flags") or {}).get("review_bounds", (r["start_s"], r["end_s"]))
+        print(f"{r['id']:>5} {r['rank']:>4}  {media.fmt_ts(start):>10}  {media.fmt_ts(end):>10} "
+              f"{end - start:>5.1f} {r['score']:>6.2f}  {lab_txt:>5}  {sig_txt}{flag}  {hook}")
 
 
 # --- commands ----------------------------------------------------------------------------------------------------
@@ -145,25 +147,36 @@ def cmd_sources(args) -> int:
 def cmd_analyze(args) -> int:
     conn, cfg, source = _open(args.source)
     pipeline.analyze(conn, cfg, args.source, transcribe=not args.no_transcribe, force=args.force,
-                     target=args.target)
-    _print_candidates(db.list_candidates(conn, args.source), db.list_labels(conn, args.source), args.top)
-    print(f"\nnext: clipper review   or   clipper render {args.source} --top 3")
+                     target=args.target, mode=args.mode)
+    _print_candidates(db.list_candidates(conn, args.source, args.mode or cfg["analysis"]["mode"]),
+                      db.list_labels(conn, args.source), args.top)
+    selected = args.mode or cfg["analysis"]["mode"]
+    print(f"\nnext: clipper review   or   clipper render {args.source} --mode {selected} --top 3")
     return 0
 
 
 def cmd_candidates(args) -> int:
-    conn, _, _ = _open(args.source)
-    _print_candidates(db.list_candidates(conn, args.source), db.list_labels(conn, args.source), args.top)
+    conn, cfg, _ = _open(args.source)
+    _print_candidates(db.list_candidates(conn, args.source, args.mode or cfg["analysis"]["mode"]),
+                      db.list_labels(conn, args.source), args.top)
     return 0
 
 
 def cmd_layout(args) -> int:
     conn, cfg, source = _open(args.source)
+    wd = pipeline.workdir(cfg, source["id"])
     if args.set or args.kind:
-        lay = pipeline.set_layout(cfg, source, args.kind, layout_mod.parse_box(args.set) if args.set else None)
+        lay = pipeline.set_layout(cfg, source, args.kind, layout_mod.parse_box(args.set) if args.set else None,
+                                  camera_type=args.camera_type)
+    elif args.detect or not args.camera_type:
+        lay = pipeline.ensure_layout(cfg, source, force=args.detect, camera_type=args.camera_type)
     else:
-        lay = pipeline.ensure_layout(cfg, source, force=args.detect)
+        saved = layout_mod.load_layout(wd) or {}
+        layout_mod.save_layout(wd, dict(saved, camera_type=args.camera_type))
+        lay = layout_mod.resolve(cfg, wd)
     print(f"layout: {lay['kind']}  facecam: {lay.get('facecam')}")
+    if args.camera_type:
+        print(f"Stream Highlights camera type: {args.camera_type}")
     if args.preview:
         t = args.at if args.at is not None else float(source["duration"]) / 2
         png = layout_mod.preview(source["path"], t, (int(source["width"]), int(source["height"])), lay, cfg,
@@ -174,9 +187,14 @@ def cmd_layout(args) -> int:
 
 def cmd_render(args) -> int:
     conn, cfg, source = _open(args.source)
-    rows = db.list_candidates(conn, args.source)
+    rows = db.list_candidates(conn, args.source, args.mode or cfg["analysis"]["mode"])
     if args.ids:
         ids = [int(x) for x in args.ids.split(",")]
+        if args.mode:
+            for cid in ids:
+                flags = db.get_candidate(conn, cid).get("flags") or {}
+                if flags.get("mode", "classic") != args.mode:
+                    raise ValueError(f"candidate #{cid} does not belong to the requested {args.mode} ranking")
     else:
         labels = db.list_labels(conn, args.source)
         wanted = (1,) if args.good_only else (1, None)  # candidates labelled bad are never rendered
@@ -273,12 +291,12 @@ def _truth(conn, source_id: int, path: str | None) -> list[tuple[float, float]]:
 
 
 def cmd_eval(args) -> int:
-    conn, _, _ = _open(args.source)
+    conn, cfg, _ = _open(args.source)
     truth = _truth(conn, args.source, args.truth)
     if not truth:
         print("no ground truth: pass --truth FILE or label candidates as good in `clipper review`")
         return 1
-    rows = _cand_dicts(db.list_candidates(conn, args.source))
+    rows = _cand_dicts(db.list_candidates(conn, args.source, args.mode or cfg["analysis"]["mode"]))
     m = evaluate.evaluate(rows, truth, args.k)
     print(f"precision@{m['k']} = {m['precision']}   recall = {m['recall']}   f1 = {m['f1']}   "
           f"({m['truth']} marked highlights)")
@@ -363,16 +381,19 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--force", action="store_true", help="recompute generated transcripts, loudness and letterbox scans")
     s.add_argument("--target", default="campaign", help="clip length target from config (campaign, story)")
     s.add_argument("--top", type=int, default=15)
+    s.add_argument("--mode", choices=["classic", "stream_highlights"], help="candidate ranking to use")
     s.set_defaults(func=cmd_analyze)
 
     s = sub.add_parser("candidates", help="list candidates")
     s.add_argument("source", type=int)
     s.add_argument("--top", type=int, default=30)
+    s.add_argument("--mode", choices=["classic", "stream_highlights"], help="candidate ranking to use")
     s.set_defaults(func=cmd_candidates)
 
     s = sub.add_parser("layout", help="detect, set or preview the facecam layout")
     s.add_argument("source", type=int)
     s.add_argument("--detect", action="store_true", help="run facecam detection again")
+    s.add_argument("--camera-type", choices=CAMERA_TYPES, help="record the camera type for Stream Highlights analysis")
     s.add_argument("--set", help="facecam box x,y,w,h as fractions of the frame")
     s.add_argument("--kind", choices=["stacked", "blur_fit", "center_crop"])
     s.add_argument("--preview", help="write a PNG with the boxes drawn")
@@ -391,6 +412,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--disclosure", action=argparse.BooleanOptionalAction, default=None,
                    help="show the paid-content tag (default from config)")
     s.add_argument("--layout", choices=["stacked", "blur_fit", "center_crop"])
+    s.add_argument("--mode", choices=["classic", "stream_highlights"], help="candidate ranking to use")
     s.set_defaults(func=cmd_render)
 
     s = sub.add_parser("exports", help="list rendered clips and whether they were posted")
@@ -424,6 +446,7 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("source", type=int)
     s.add_argument("--truth")
     s.add_argument("--k", type=int, default=10)
+    s.add_argument("--mode", choices=["classic", "stream_highlights"], help="candidate ranking to use")
     s.set_defaults(func=cmd_eval)
 
     s = sub.add_parser("tune", help="search signal weights that best match your ground truth")

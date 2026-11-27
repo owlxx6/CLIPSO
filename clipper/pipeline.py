@@ -11,8 +11,11 @@ from pathlib import Path
 
 import numpy as np
 
-from clipper import campaign, config, db, dedup, detect, media, render, subtitles, variants
+from clipper import campaign, config, db, dedup, detect, media, opening, render, subtitles, variants
 from clipper import layout as layout_mod
+from clipper import stream_highlights as hunter
+from clipper.signals import stream as activity
+from clipper.signals import payoff
 from clipper.signals import audio, chat, viewer_clips, visual
 from clipper.signals import transcript as tr
 
@@ -214,28 +217,124 @@ def compute_signals(cfg: dict, source: dict, transcribe: bool = True, force: boo
     return sig, tdata
 
 
+def _stream_transcript(cfg, source, transcribe, force, log, digest):
+    try:
+        data = get_transcript(cfg, source, transcribe, log, force, source_digest=digest)
+    except (json.JSONDecodeError, KeyError, TypeError) as exc:
+        log(f"Unreadable transcript metadata ({type(exc).__name__}); using acoustic and visual evidence only")
+        return None
+    return activity.usable_transcript(data, source["duration"])
+
+
+def _stream_candidates(cfg, source, transcribe, force, log):
+    wd = workdir(cfg, source["id"])
+    saved_layout = layout_mod.load_layout(wd) or {}
+    settings = dict(cfg["stream_highlights"])
+    settings["camera_type"] = saved_layout.get("camera_type", settings["camera_type"])
+    opening.validate(settings["opening"])
+    hop, duration = float(cfg["analysis"]["hop_s"]), source["duration"]
+    if (hop <= 0 or settings["sample_fps"] <= 0 or settings["scan_width"] < 32
+            or not 0 < settings["min_s"] <= settings["max_s"] or settings["max_event_s"] <= 0
+            or not 0 < settings["pitch_min_hz"] < settings["pitch_max_hz"] or not 0 < settings["voicing_threshold"] <= 1
+            or settings["camera_type"] not in activity.CAMERA_TYPES
+            or not 0 <= settings["sync_s"] or settings["delayed_sync_s"] < 0
+            or not 0 < settings["quiet_still_fraction"] < settings["quiet_change_fraction"] <= 1
+            or not 0 < settings["reaction_release"] <= settings["evidence_floor"] or not 0 < settings["hard_cut"] <= 1
+            or any(settings[k] <= 0 for k in ("speech_setup_s", "speech_continuation_s", "setup_snap_s",
+                                              "hold_s", "read_s", "topic_pause_s", "repeat_laugh_gap_s",
+                                              "payoff_search_s", "baseline_s", "energy_rise_db", "motion_rise", "scene_change",
+                                              "pitch_change_semitones"))):
+        raise ValueError("invalid stream_highlights timing, sampling or activity settings")
+    raw = raw_signals(cfg, source, force, log)
+    digest = media.sha256_file(source["path"])
+    data = _stream_transcript(cfg, source, transcribe, force, log, digest)
+    reference = payoff.result_reference(settings)
+    lay = (ensure_layout(cfg, source, log=log) if settings["camera_type"] == "webcam"
+           else layout_mod.resolve(cfg, wd))
+    rate = int(cfg["analysis"]["audio"]["sample_rate"])
+    pitch_settings = [settings[k] for k in ("pitch_min_hz", "pitch_max_hz", "pitch_change_semitones", "voicing_threshold")]
+    visual_settings = {k: settings[k] for k in ("camera_type", "quiet_still_fraction", "quiet_change_fraction",
+                                                "hold_s", "hard_cut", "result_card")}
+    reference_hash = hashlib.sha256(reference.tobytes()).hexdigest() if reference is not None else None
+    key = json.dumps([4, digest, rate, pitch_settings, visual_settings, reference_hash,
+                      list(reference.shape) if reference is not None else None,
+                      hop, lay["facecam"], settings["sample_fps"], settings["scan_width"],
+                      settings["baseline_s"], settings["motion_rise"], settings["scene_change"]], sort_keys=True)
+    cache = wd / "stream_activity.npz"
+    features = None
+    if cache.exists() and not force:
+        with np.load(cache) as saved:
+            if str(saved["_key"]) == key:
+                features = {k: saved[k] for k in saved.files if k != "_key"}
+    if features is None:
+        log("measuring gameplay and facecam activity ...")
+        features = activity.visual_features(source, lay["facecam"], duration, hop, settings, reference)
+        features["pitch_change"] = activity.pitch_changes(source, hop, rate, settings)
+        with tempfile.TemporaryDirectory(dir=wd) as folder:
+            temp = Path(folder) / cache.name
+            np.savez_compressed(temp, _key=key, **features)
+            temp.replace(cache)
+    features.update(activity.audio_features(raw["_db"], data, duration, hop, settings, cfg["signals"]["keywords"],
+                                           features["pitch_change"]))
+    features["audio_db"] = raw["_db"]
+    game = activity.measures_gameplay(settings["camera_type"], lay["facecam"])
+    channels = {
+        "gameplay": game, "mixed_audio": bool(source["has_audio"]), "transcript": data is not None,
+        "tracked_face": bool(np.any(features["facecam_confidence"] > 0)),
+        "result_card": game and reference is not None,
+    }
+    if not channels["transcript"]:
+        log("No usable transcript. Speech timing, lexical laughter and narrative evidence are unavailable.")
+    log("Active channels: " + (", ".join(k for k, active in channels.items() if active) or "none"))
+    cands, score = hunter.propose(features, data, duration, hop, settings, cfg["detection"]["top_k"])
+    for cand in cands:
+        cand.flags["active_channels"] = channels
+        cine = raw["_cinematic"][int(cand.start/hop):int(np.ceil(cand.end/hop))]
+        cand.flags["spoiler_review"] = bool(len(cine) and cine.mean() >= cfg["detection"]["cinematic_flag_fraction"])
+    return cands, score, channels
+
+
 def analyze(conn, cfg: dict, source_id: int, transcribe: bool = True, force: bool = False,
-            target: str = "campaign", log=print) -> list[dict]:
+            target: str = "campaign", log=print, mode: str | None = None) -> list[dict]:
     source = db.get_source(conn, source_id)
-    sig, tdata = compute_signals(cfg, source, transcribe, force, log)
-    cands, score = detect.detect(sig, cfg, float(source["duration"]), tdata, target)
+    mode = mode or cfg["analysis"].get("mode", hunter.CLASSIC)
+    if mode == hunter.MODE:
+        cands, score, channels = _stream_candidates(cfg, source, transcribe, force, log)
+    elif mode == hunter.CLASSIC:
+        sig, data = compute_signals(cfg, source, transcribe, force, log)
+        cands, score = detect.detect(sig, cfg, float(source["duration"]), data, target)
+    else:
+        raise ValueError(f"unknown analysis mode: {mode}")
     rows = []
     for cand in cands:
         row = cand.as_dict()
         if config.get(cfg, "render.hook.auto", True):
-            row["hook"] = tr.peak_phrase(tdata, cand.peak, int(config.get(cfg, "render.hook.max_words", 7))) or None
+            if mode == hunter.MODE:
+                row["hook"] = next(iter(cand.flags["hooks"]), None)
+            else:
+                row["hook"] = tr.peak_phrase(data, cand.peak, int(config.get(cfg, "render.hook.max_words", 7))) or None
         rows.append(row)
-    db.replace_candidates(conn, source_id, rows)
-    np.save(workdir(cfg, source_id) / "score.npy", score)
-    log(f"{len(rows)} candidates from signals: {', '.join(k for k in detect.SIGNAL_NAMES if k in sig)}")
+    db.replace_candidates(conn, source_id, rows, mode=mode)
+    if mode == hunter.MODE:
+        wd = workdir(cfg, source_id)
+        with tempfile.TemporaryDirectory(dir=wd) as folder:
+            path = Path(folder) / "stream_channels.json"
+            path.write_text(json.dumps(channels), encoding="utf-8")
+            path.replace(wd / path.name)
+    np.save(workdir(cfg, source_id) / ("stream_score.npy" if mode == hunter.MODE else "score.npy"), score)
+    log(f"{len(rows)} candidates from {mode}" if rows else f"{mode}: no candidate cleared the evidence threshold")
     return rows
+
 
 
 # --- layout ------------------------------------------------------------------------------------------------------
 
-def ensure_layout(cfg: dict, source: dict, force: bool = False, log=print) -> dict:
+def ensure_layout(cfg: dict, source: dict, force: bool = False, log=print, *, camera_type: str | None = None) -> dict:
     wd = workdir(cfg, source["id"])
-    if not force and (layout_mod.load_layout(wd) is not None or config.get(cfg, "streamer.facecam")):
+    previous = layout_mod.load_layout(wd) or {}
+    if not force and (previous.get("kind") or config.get(cfg, "streamer.facecam")):
+        if camera_type and camera_type != previous.get("camera_type"):
+            layout_mod.save_layout(wd, dict(previous, camera_type=camera_type))
         return layout_mod.resolve(cfg, wd)
     log("looking for the facecam ...")
     found = layout_mod.detect_facecam(source["path"], float(source["duration"]),
@@ -246,15 +345,20 @@ def ensure_layout(cfg: dict, source: dict, force: bool = False, log=print) -> di
     else:
         saved = {"kind": "blur_fit", "facecam": None, "auto": True}
         log("no stable facecam found: using the blurred-background layout")
+    if camera_type or previous.get("camera_type"):
+        saved["camera_type"] = camera_type or previous["camera_type"]
     layout_mod.save_layout(wd, saved)
     return layout_mod.resolve(cfg, wd)
 
 
-def set_layout(cfg: dict, source: dict, kind: str | None = None, box: dict | None = None) -> dict:
+def set_layout(cfg: dict, source: dict, kind: str | None = None, box: dict | None = None,
+               *, camera_type: str | None = None) -> dict:
     wd = workdir(cfg, source["id"])
     current = layout_mod.load_layout(wd) or {}
     facecam = box if box is not None else current.get("facecam")
     saved = {"kind": kind or ("stacked" if facecam else "blur_fit"), "facecam": facecam, "auto": False}
+    if camera_type or current.get("camera_type"):
+        saved["camera_type"] = camera_type or current["camera_type"]
     layout_mod.save_layout(wd, saved)
     return layout_mod.resolve(cfg, wd)
 
@@ -288,7 +392,7 @@ def _export_snapshot(conn, platform: str) -> list[dict]:
 
 
 def _publish(conn, staged: Path, directory: Path, previous: list[dict], replaced: list[dict],
-             fields: dict, source: dict, log=print) -> tuple[int, Path]:
+             fields: dict, source: dict, log=print, *, cut_distance=None) -> tuple[int, Path]:
     moved = []
     try:
         with conn:
@@ -298,6 +402,12 @@ def _publish(conn, staged: Path, directory: Path, previous: list[dict], replaced
                 raise RuntimeError("Source permissions changed during rendering. Review the source and retry.")
             if _export_snapshot(conn, fields["platform"]) != previous:
                 raise RuntimeError("Exports changed during rendering. Retry with current export records.")
+            if cut_distance is not None:
+                for sibling in db.list_exports(conn, candidate_id=fields["candidate_id"]):
+                    if sibling["platform"] != fields["platform"] and variants.cuts_conflict(
+                            fields["start_s"], fields["end_s"], sibling["start_s"], sibling["end_s"], cut_distance):
+                        raise RuntimeError(f"{fields['platform']} conflicts with retained {sibling['platform']} "
+                                           f"export #{sibling['id']}. Both cut edges need {cut_distance:g}s spacing.")
             n = 1
             while any(directory.glob(f"{fields['platform']}_v{n}.*")):
                 n += 1
@@ -336,13 +446,20 @@ def render_candidates(conn, cfg: dict, source_id: int, candidate_ids: list[int],
     before = _source_key(source)
     source_digest = media.sha256_file(source["path"])
     policy = campaign.policy_for(cfg, source.get("campaign"))
-    transcript = get_transcript(cfg, source, transcribe=False, log=log, source_digest=source_digest)
-    all_words = tr.words(transcript)
     cands = [db.get_candidate(conn, cid) for cid in candidate_ids]
+    if cands and all((c.get("flags") or {}).get("mode") == hunter.MODE for c in cands):
+        transcript = _stream_transcript(cfg, source, False, False, log, source_digest)
+    else:
+        transcript = get_transcript(cfg, source, transcribe=False, log=log, source_digest=source_digest)
+    all_words = tr.words(transcript)
     for cand in cands:  # checked before anything is rendered
         if cand["source_id"] != source_id:
             raise ValueError(f"candidate #{cand['id']} belongs to source #{cand['source_id']}")
+        review_bounds = (cand.get("flags") or {}).get("review_bounds")
+        if review_bounds:
+            cand["start_s"], cand["end_s"] = review_bounds
         if (config.get(cfg, "render.subtitles.enabled", True) and (cand.get("text") or "").strip()
+                and not (review_bounds and transcript)
                 and not tr.text_between(transcript, cand["start_s"], cand["end_s"])):
             raise RuntimeError(f"candidate #{cand['id']} has speech but its transcript is missing or was made from "
                                f"another file, so the clip would have no captions: run clipper analyze {source_id}")
@@ -366,12 +483,38 @@ def render_candidates(conn, cfg: dict, source_id: int, candidate_ids: list[int],
         cid = cand["id"]
         if (cand.get("flags") or {}).get("spoiler_review"):
             log(f"candidate #{cid}: looks like a cutscene, check it for story spoilers before posting")
-        used = {p: [(e["start_s"], e["end_s"]) for e in db.list_exports(conn, platform=p, source_id=source_id)]
-                for p in platforms}
+        protected = (cand.get("flags") or {}).get("mode") == hunter.MODE
+        existing = db.list_exports(conn, source_id=source_id)
+        own = [e for e in existing if e["candidate_id"] == cid]
+        blocked = {}
+        if protected:
+            for e in own:
+                p = e["platform"]
+                if p in platforms and db.post_for(conn, e["id"]):
+                    blocked[p] = f"already exported on {p} as posted export #{e['id']}"
+                elif p in platforms and not replace:
+                    blocked.setdefault(p, f"already exported on {p} as export #{e['id']} (same moment)")
+        requested = [p for p in platforms if p not in blocked]
+        used = {p: [(e["start_s"], e["end_s"]) for e in existing if e["platform"] == p
+                    and not (protected and replace and e["candidate_id"] == cid)] for p in requested}
+        reserved = tuple((e["start_s"], e["end_s"]) for e in own if e["platform"] not in requested)
+        replacing = {}
+        if protected and replace:
+            for e in own:
+                if e["platform"] in requested:
+                    replacing.setdefault(e["platform"], []).append((e["start_s"], e["end_s"]))
+        for p, reason in blocked.items():
+            log(f"skipping #{cid} on {p}: {reason}")
+            results.append({"candidate_id": cid, "platform": p, "start": cand["start_s"], "end": cand["end_s"],
+                            "start_ts": media.fmt_ts(cand["start_s"]), "end_ts": media.fmt_ts(cand["end_s"]),
+                            "blocked_reason": reason, "path": None, "export_id": None})
         plans = variants.plan_variants(cid, cand["start_s"], cand["end_s"], cand["peak_s"], float(source["duration"]),
-                                       platforms, cfg, used, transcript=transcript,
+                                       requested, cfg, used, transcript=transcript,
                                        cues=(cand.get("flags") or {}).get("boundary_cues", []),
-                                       duration_limits=campaign.duration_limits(policy))
+                                       duration_limits=campaign.duration_limits(policy),
+                                       end_ceiling=(cand.get("flags") or {}).get("end_ceiling"),
+                                       scene_start=(cand.get("flags") or {}).get("opening_context", {}).get("scene_start"),
+                                       protected=protected, reserved=reserved, replacing_cuts=replacing)
         hook_text = hook or cand.get("hook") or None
         out_dir = export_dir(cfg, source_id, cid)
         step, size = float(dcfg.get("frame_step_s", 1.0)), int(dcfg.get("hash_size", 16))
@@ -416,7 +559,8 @@ def render_candidates(conn, cfg: dict, source_id: int, candidate_ids: list[int],
                 render.make_cover(out, v.cover_at, out.with_suffix(".jpg"))
                 if not out.with_suffix(".jpg").stat().st_size:
                     raise media.MediaError("Empty cover image")
-                caption = make_caption(cfg, source, hook_text, cand.get("text") or "")
+                caption_text = "" if (cand.get("flags") or {}).get("mode") == hunter.MODE else cand.get("text")
+                caption = make_caption(cfg, source, hook_text, caption_text or "")
                 meta = {
                     "source_id": source_id, "source_path": source["path"], "rights": source["rights"],
                     "campaign": source.get("campaign"), "candidate_id": cid, "platform": v.platform,
@@ -427,6 +571,12 @@ def render_candidates(conn, cfg: dict, source_id: int, candidate_ids: list[int],
                 }
                 if _source_key(source) != before:
                     raise RuntimeError("Recording changed during render; reanalyze the source")
+                if (cand.get("flags") or {}).get("mode") == hunter.MODE:
+                    flags = cand["flags"]
+                    if "opening_context" in flags:
+                        flags = opening.scored_flags(flags, v.start, v.end)
+                        flags.pop("opening_context")  # receipt keeps only evidence for this exported window
+                    meta["highlight"] = dict(flags, scores=cand["signals"])
                 meta.update(source_sha256=source_digest, artifact_sha256=media.sha256_file(out),
                             duration_s=measured["duration"])
                 meta["validation"] = campaign.check(meta, policy, technical=True)
@@ -434,15 +584,22 @@ def render_candidates(conn, cfg: dict, source_id: int, candidate_ids: list[int],
                 out.with_suffix(".txt").write_text(caption + "\n", encoding="utf-8")
                 fields = dict(candidate_id=cid, source_id=source_id, platform=v.platform, start_s=v.start,
                               end_s=v.end, hook=hook_text, caption=caption, signature=sig)
-                eid, out = _publish(conn, out, out_dir, snapshot, replaced, fields, source, log)
+                eid, out = _publish(conn, out, out_dir, snapshot, replaced, fields, source, log,
+                                    cut_distance=cfg["variants"]["min_cut_distance_s"] if protected else None)
             results.append(dict(meta, export_id=eid, path=str(out)))
     return results
 
 
-def preview_proxy(cfg: dict, source: dict, cand: dict) -> Path:
+def preview_proxy(cfg: dict, source: dict, cand: dict, layout_kind: str | None = None) -> Path:
     height = int(config.get(cfg, "render.proxy_height", 480))
     # the name is the cache key: same window of the same file at the same size
-    key = hashlib.sha1(json.dumps([_source_key(source), height], sort_keys=True).encode("utf-8")).hexdigest()[:12]
+    preview_layout = None
+    if layout_kind:
+        preview_layout = layout_mod.resolve(cfg, workdir(cfg, source["id"]), layout_kind)
+    key = hashlib.sha1(json.dumps([_source_key(source), height, preview_layout, cfg["layout"],
+                                  cfg["render"]["facecam_band_h"], cfg["render"]["height"], cfg["render"]["width"]],
+                                  sort_keys=True).encode("utf-8")).hexdigest()[:12]
     out = config.data_dir(cfg) / "proxies" / f"source_{source['id']}" / \
         f"{cand['start_s']:.2f}_{cand['end_s']:.2f}_{key}.mp4"
-    return render.make_proxy(source["path"], cand["start_s"], cand["end_s"], out, height)
+    return render.make_proxy(source["path"], cand["start_s"], cand["end_s"], out, height,
+                             layout=preview_layout, cfg=cfg)

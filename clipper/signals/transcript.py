@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import unicodedata
 from pathlib import Path
@@ -40,13 +41,19 @@ def transcribe(path: str | Path, tcfg: dict, log=print) -> dict | None:
         vad_filter=bool(tcfg.get("vad_filter", True)),
         beam_size=int(tcfg.get("beam_size", 1)),
     )
-    out = {"language": info.language, "segments": []}
+    def confidence(item, *fields):
+        return {key: float(value) for key in fields if (value := getattr(item, key, None)) is not None
+                and math.isfinite(value)}
+
+    out = {"language": info.language, "segments": [], **confidence(info, "language_probability")}
     for seg in segments:
         out["segments"].append({
             "start": round(float(seg.start), 3),
             "end": round(float(seg.end), 3),
             "text": seg.text.strip(),
-            "words": [{"start": round(float(w.start), 3), "end": round(float(w.end), 3), "word": w.word.strip()}
+            **confidence(seg, "avg_logprob", "no_speech_prob", "compression_ratio"),
+            "words": [{"start": round(float(w.start), 3), "end": round(float(w.end), 3), "word": w.word.strip(),
+                       **confidence(w, "probability")}
                       for w in (seg.words or [])],
         })
     return out

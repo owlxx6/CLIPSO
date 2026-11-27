@@ -108,6 +108,25 @@ def fit_bounds(start: float, end: float, peak: float, duration: float, min_s: fl
     return round(start, 2), round(end, 2)
 
 
+def _protect_words(start, end, peak, duration, min_s, max_s, words):
+    """Repair a duration-adjusted edge that landed inside speech, retaining the peak and both length limits."""
+    nearby = [(w["start"], w["end"]) for w in words if w["end"] >= start - max_s and w["start"] <= end + max_s]
+    def edges(t):
+        crossing = [(a, b) for a, b in nearby if a < t < b]
+        return {v for pair in crossing for v in pair} if crossing else {t}
+    starts, ends = edges(start), edges(end)
+    if starts == {start} and ends == {end}:
+        return start, end
+    pairs = {(a, b) for a in starts for b in ends}
+    for a in starts:
+        pairs.update((a, a + length) for length in (min_s, max_s))
+    for b in ends:
+        pairs.update((b - length, b) for length in (min_s, max_s))
+    valid = [(a, b) for a, b in pairs if 0 <= a < peak < b <= duration and min_s <= b - a <= max_s
+             and not any(l < a < r or l < b < r for l, r in nearby)]
+    return min(valid, key=lambda x: (abs(x[0] - start) + abs(x[1] - end), x[0], -x[1]), default=None)
+
+
 def _overlap(a: Candidate, b: Candidate) -> float:
     inter = max(0.0, min(a.end, b.end) - max(a.start, b.start))
     return inter / max(1e-6, min(a.duration, b.duration))
@@ -127,6 +146,7 @@ def detect(
     score = combine(signals, weights or d["weights"], hop, float(d["smoothing_s"]))
     peaks = pick_peaks(score, hop, float(d["min_gap_s"]), float(d["min_score"]), int(d["top_k"]) * 3)
     segs = tr.segments(transcript)
+    words = tr.words(transcript)
     db = signals.get("_db")
     cine = signals.get("_cinematic")
     search = float(d["snap_search_s"])
@@ -136,10 +156,27 @@ def detect(
         start = snap_start(t - float(d["pre_roll_s"]), segs, db, hop, search)
         end = snap_end(t + float(d["post_roll_s"]), segs, db, hop, search)
         start, end = fit_bounds(start, end, t, duration, float(tgt["min_s"]), float(tgt["max_s"]))
+        if words:
+            safe = _protect_words(start, end, t, duration, float(tgt["min_s"]), float(tgt["max_s"]), words)
+            if safe is None:
+                continue
+            start, end = safe
         lo, hi = max(0, idx - int(2 / hop)), idx + int(2 / hop) + 1
         sig = {name: round(float(np.max(signals[name][lo:hi])), 2)
                for name in SIGNAL_NAMES if name in signals and len(signals[name][lo:hi])}
         flags: dict[str, Any] = {}
+        # Store measured cut cues with the candidate so rendering needs no second signal pass.
+        cues = set()
+        for edge in (start, end):
+            if db is not None and db.size:
+                quiet = _quietest(db, edge - search, edge + search, hop, edge)
+                i = int(quiet / hop)
+                if 0 <= i < len(db) and db[i] < -35:
+                    cues.add(quiet)
+        for t_scene in signals.get("_scene_boundaries", []):
+            if min(abs(t_scene - start), abs(t_scene - end)) <= search:
+                cues.add(float(t_scene))
+        flags["boundary_cues"] = sorted(cues)
         if cine is not None and cine.size:
             frac = float(np.mean(cine[int(start / hop):max(int(start / hop) + 1, int(end / hop))]))
             flags["cinematic"] = round(frac, 2)

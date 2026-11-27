@@ -79,7 +79,7 @@ for c in cands[:top_n]:
                     with st.spinner("Rendering ..."):
                         # replace=True: re-rendering an unposted export (new hook, new cut) replaces it
                         res = pipeline.render_candidates(conn, cfg, src["id"], [c["id"]], platforms,
-                                                         hook=hook or None, replace=True, log=lambda *_: None)
+                                                         hook=hook or None, replace=True, log=st.caption)
                     done = [r for r in res if r["path"] and not r["blocked_reason"]]
                     st.success(f"{len(done)} file(s) rendered")
                     for r in res:

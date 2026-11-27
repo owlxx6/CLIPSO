@@ -74,9 +74,7 @@ First round-trip one existing single-cut variant through a serialized plan and c
 .agents/skills/clipper-review/SKILL.md
 .agents/skills/clipper-verify/SKILL.md
 .github/workflows/test.yml
-AGENTS.md
 README.md
-TASKS.md
 clipper/campaign.py
 clipper/cli.py
 clipper/db.py
